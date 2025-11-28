@@ -1,0 +1,33 @@
+You have been provided with two primary datasets in Excel format.
+
+File A: Liste des candidatures (The Demand)
+What it is: A log of every application received. Each row represents one candidate applying to one specific job opening.
+Key Variables:
+Référence de l’annonce: The "Foreign Key" used to link this application to the specific job opening in File B.
+Date: Date of application (critical for calculating "Time-to-Hire" or process bottlenecks).
+Statut / Etape: The current status of the application (e.g., "Candidature", "Refus", "Entretien"). Analyzing where candidates drop off here is key for Track B1.
+Ville du candidat / Code postal: The candidate's location. Essential for B2 students to calculate commute distances.
+Diplôme... / Titulaire du diplôme...: Various columns indicating the candidate's self-declared qualifications.
+Challenge: This data is often incomplete or messy (e.g., "CAP Petite Enfance" might appear in different text formats). You will likely need to cross-reference this with the PDF analysis to confirm true "CAT 1" or "CAT 2" status.
+Prénom / Nom / Email: Empty. These have been anonymized for privacy.
+File B: Liste des annonces (The Supply)
+What it is: A list of all open positions (vacancies) in the Grandir network.
+Key Variables:
+Référence: The unique ID of the job opening. Use this to join with File A.
+CAT: CRITICAL. This indicates the regulatory category of the job (CAT 1, CAT 2, or CAT 3).
+Context: A "CAT 1" job (e.g., Auxiliaire de Puériculture) requires a specific state diploma. A "CAT 2" job allows for different qualifications. Your matching engine must ensure candidates have the right diploma for the right CAT, and, this can be tricky.
+Quelle est la couleur de la crèche ?: CRITICAL. This represents the Urgency Score:
+🔴 Rouge: Critical urgency. High vacancy rate. Needs immediate matching.
+🟠 Orange: High urgency.
+🟢 Verte: Normal urgency.
+Strategy: in your solution, you must prioritize filling "Rouge" roles first.
+Localisation: The full address of the kindergarten. Use this for geolocation.
+Total candidatures reçues vs A TRAITER: Metrics showing the backlog for each specific job.
+Google Maps sharing list (The Locations)
+
+
+Source: https://www.google.com/maps/d/u/0/viewer?mid=1atzr9igxw23EPPm6FQtOSGKWSAnHtNo&ll=42.465286513735066%2C-4.759829973885141&z=6
+The client provided this link to visually show where their kindergartens are. But as a Data Product Manager, you should see more than just a picture.
+The hack: Geocoding addresses (converting "12 Rue de la Paix" to "48.86, 2.33") is difficult and usually costs money via APIs.
+Hint: This map already contains the GPS coordinates of every nursery. Is there a way to download the underlying file behind a Google Map? (Keywords to research: KML, KMZ, XML parsing).
+Why this matters: If you can extract this data, you have instant, free, 100% accurate geolocation for the entire network. Figure it out!

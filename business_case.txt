@@ -1,0 +1,37 @@
+Context & Mission
+Grandir (Les Chaperons Rouges) is facing a challenge of scale. With a massive influx of approximately 12,000 CVs per month, the central issue is no longer just "finding people"—it is efficiently qualifying them and directing the right profiles to the kindergartens that need them most.
+
+In this BDD a bit atypical, your mission is to move beyond simple analysis and adopt a Product mindset. You are not just answering questions; you are designing a solution to:
+
+Ensure Qualification: Rapidly distinguish between unqualified applicants and compliant candidates (specifically regarding CAT 1/CAT 2 regulations).
+Increase Conversion: Fix the "leaky bucket" where good candidates are lost due to slow or generic processing.
+Prioritize Urgency: Direct the best talent first to the kindergartens flagged as "Orange" or "Red" (highest urgency/vacancy rates).
+
+
+The "Product" Approach & Data Reality
+In a perfect world, you would have a clean SQL database with every timestamp and candidate coordinate perfectly formatted. This is not a perfect world.
+
+You will be working with a mix of structured data (Excel lists of creches) and unstructured reality (Crèches location at Google Maps list). Data availability and quality are major constraints in this case—this is a feature of the challenge, not a bug.
+
+A "Product" approach means:
+
+Don't complain about missing data; design around it. If you lack a specific timestamp, how can you infer urgency? If you don't have the coordinates to match closest kindergartens to the candidates, what workaround (API, simplified zone matching) can be envisioned?
+Focus on the User Experience: For the recruiters at Grandir, how does your solution reduce the time they spend reading irrelevant CVs? For the candidate, how does your solution ensure they are matched to a job they can actually commute to?
+
+
+Your Objectives
+
+While all teams are solving the same business problem, your focus will differ from B1 & B2:
+
+
+Qualification & Conversion focused on Business and Process
+Your goal is to re-engineer the funnel. You must propose a solution that allows recruiters to process applications faster.
+Key Question: How can we define/discover a "qualified" candidate by leveraging OCR tools or any other solution? How do we visualize the "Red/Orange" urgency so recruiters attack those needs first?
+Extra Mile for excellency: Come up with a deployable tool (Be it as POC, MVP, or prod) that Grandir recruiters can use tomorrow.
+
+
+The Matching Engine
+Your goal is to improve the matching between "good" talents and crèches in most need. This is currently done manually by recruiters.
+You must build the logic/algorithm that matches a candidate's constraints (qualification, location) to the network's needs.
+Key Question: How do we programmatically map a candidate's address to the nearest "Red" urgency kindergarten? With your solution, how key performance KPIs can be improved?
+Extra Mile for excellency: Come up with a deployable tool (Be it as POC, MVP, or prod) that Grandir recruiters can use tomorrow.
