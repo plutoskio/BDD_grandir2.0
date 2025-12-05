@@ -47,12 +47,23 @@ class Candidate(Base):
     __tablename__ = 'candidates'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
+    first_name = Column(String)
+    last_name = Column(String)
+    email = Column(String)
+    phone = Column(String)
     city = Column(String)
     zip_code = Column(String)
     latitude = Column(Float)
     longitude = Column(Float)
     current_diploma = Column(String)
     experience_years = Column(String)
+    
+    # New AI/CV Fields
+    cv_text = Column(Text)
+    diploma_ai = Column(String) # Extracted Diploma
+    experience_ai = Column(String) # Extracted Years of Experience
+    closeness_score = Column(Integer) # 0-100 Score
+    qualitative_analysis = Column(Text) # LLM Explanation
     
     applications = relationship("Application", back_populates="candidate")
 
