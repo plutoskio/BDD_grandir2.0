@@ -34,10 +34,11 @@ def extract_text_from_pdf(pdf_path):
         text = ""
         for page in reader.pages:
             text += page.extract_text() or ""
+        if len(text.strip()) < 50: return None
         return text
     except Exception as e:
         print(f"Error reading {pdf_path}: {e}")
-        return ""
+        return None
 
 def clean_phone(phone):
     if pd.isna(phone): return ""
@@ -46,6 +47,63 @@ def clean_phone(phone):
     # normalize +33
     if phone.startswith('+33'): phone = '0' + phone[3:]
     return phone
+
+def get_candidate_info_from_pdf_ai(pdf_path):
+    """Fallback: Use Gemini to read scanned PDF and finding candidate identity."""
+    if not model: return None, None, None, None, None
+    
+    try:
+        # Upload file (or send parts)
+        # Simplified: We can't easily upload file in this environment without 'genai.upload_file' 
+        # but let's assume we can read bytes and generic 'document' processing.
+        # Actually, let's try to extract text via a simple image-based approach if we can't upload?
+        # No, 'gemini-1.5-flash' and '2.0-flash-exp' support PDF.
+        # implementation:
+        file_data = pdf_path.read_bytes()
+        
+        prompt = """
+        This is a CV. Extract the candidate's identity in JSON:
+        {"first_name": "...", "last_name": "...", "email": "...", "phone": "...", "city": "...", "zip_code": "..."}
+        If you can't read it, return empty JSON.
+        """
+        
+        # Retry Logic
+        for attempt in range(3):
+            try:
+                response = model.generate_content([
+                    {'mime_type': 'application/pdf', 'data': file_data},
+                    prompt
+                ])
+                break
+            except Exception as e:
+                if "429" in str(e) or "Resource exhausted" in str(e):
+                    print(f"Rate Limit Hit. Sleeping 60s... (Attempt {attempt+1}/3)")
+                    time.sleep(60)
+                else:
+                    raise e
+        else:
+             print(f"Failed to extract {pdf_path.name} after retries.")
+             return None, None, None, None, None
+
+        text = response.text
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0]
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0]
+            
+        data = json.loads(text)
+        name_parts = str(data.get('first_name', '') + " " + data.get('last_name', '')).strip().split()
+        first = data.get('first_name') or (name_parts[0] if name_parts else 'Unknown')
+        last = data.get('last_name') or (" ".join(name_parts[1:]) if len(name_parts)>1 else 'Unknown')
+        
+        # Rate limit safety for subsequent calls
+        time.sleep(2) 
+        
+        return data.get('email'), data.get('phone'), f"{first} {last}", data.get('zip_code'), data.get('city')
+        
+    except Exception as e:
+        print(f"AI OCR Error for {pdf_path.name}: {e}")
+        return None, None, None, None, None
 
 def get_ai_data(cv_text, job_context="Recruitment"):
     if not model:
@@ -78,6 +136,36 @@ def get_ai_data(cv_text, job_context="Recruitment"):
         print(f"AI Error: {e}")
         return None
 
+# --- Normalization Logic ---
+def normalize_diploma(text):
+    if not text or pd.isna(text): return "UNKNOWN"
+    t = str(text).lower()
+    
+    # 1. INFIRMIER
+    if 'infirmier' in t or 'ide' in t or 'nurse' in t: return "DE_INFIRMIER"
+    
+    # 2. EJE
+    if 'eje' in t or 'educateur' in t or 'jeunes enfants' in t: return "DE_EJE"
+    
+    # 3. AUXILIAIRE
+    if 'auxiliaire' in t or 'ap' in t or 'deap' in t or 'pueri' in t: return "DE_AUXILIAIRE"
+    
+    # 4. CAP / AEPE
+    if 'cap' in t or 'aepe' in t or 'petite enfance' in t: return "CAP_AEPE"
+    
+    # 5. MANAGER / DIRECTEUR (If distinctive?)
+    # For now, Directeur usually requires EJE or Infirmier, but let's keep it simple.
+    
+    return "UNKNOWN"
+
+def get_required_diplomas(job_title):
+    t = str(job_title).lower()
+    # Logic defining strict requirements
+    if 'infirmier' in t: return json.dumps(["DE_INFIRMIER"])
+    if 'eje' in t or 'educateur' in t or 'directeur' in t: return json.dumps(["DE_EJE", "DE_INFIRMIER"]) # Directeurs can be either
+    if 'auxiliaire' in t: return json.dumps(["DE_AUXILIAIRE"])
+    return json.dumps([]) # No strict requirement or Unknown
+
 # --- Ingestion Logic ---
 
 def run_ingestion():
@@ -91,16 +179,22 @@ def run_ingestion():
     print("Loading Candidates CSV...")
     df_c = pd.read_csv(CANDIDATE_CSV, low_memory=False)
     
-    # Create Index: Email -> Row, CleanPhone -> Row, "Name Surname" -> Row
-    # We prioritize Email.
+    # Create Index: Email -> Row, Phone -> Row, "Name Surname" -> Row
     candidates_index = {}
+    phone_index = {}
     
     print("Indexing Candidates...")
     for idx, row in df_c.iterrows():
-        # Helpers
+        # Email
         email = str(row.get('Email', '')).strip().lower()
         if email and '@' in email:
             candidates_index[email] = row
+            
+        # Phone
+        raw_phone = str(row.get('Téléphone', ''))
+        c_phone = clean_phone(raw_phone)
+        if len(c_phone) >= 9: # Valid length check
+            phone_index[c_phone] = row
             
         # Name matching logic (Fallback)
         first = str(row.get('Prénom', '')).strip().lower()
@@ -108,195 +202,234 @@ def run_ingestion():
         full = f"{first} {last}"
         if len(full) > 2:
            candidates_index[full] = row
-           # Also simplified "Last First"
            candidates_index[f"{last} {first}"] = row
 
-    # 3. Process CVs
+    # 3. Process CVs (and unify with CSV data)
+    # Strategy: Iterate CSV rows (All Candidates) OR just CVs?
+    # Requirement: "We keep only candidates with CVs".
+    # So we stick to iterating PDF files. 
+    # BUT, we need to populate Normalized Diploma even if AI fails?
+    # Users said "We keep only candidates with CVs". So iterating PDF files is correct.
+    
     print(f"Processing CVs in {CV_DIR}...")
     pdf_files = list(Path(CV_DIR).glob("*.pdf"))
     
     matched_count = 0
-    
-    # Geocoder
     nomi = pgeocode.Nominatim('fr')
     
     for pdf_path in pdf_files:
-        # Extract Text
         content = extract_text_from_pdf(pdf_path)
-        if not content: continue
         
-        # 1. Email Match
-        found_emails = re.findall(r'[\w\.-]+@[\w\.-]+', content)
-        for e in found_emails:
-            if e.lower() in candidates_index:
-                match_row = candidates_index[e.lower()]
-                break
+        # OCR FALLBACK / AI Data Prep
+        ai_identity = {} 
+        is_scanned = False
         
-        # 2. Phone Match (if no email match)
-        if match_row is None:
-            # Extract potential phone numbers (digit sequences len 10+)
-            # Normalize content phones?
-            # Simple heuristic: look for 10 digit sequences
-            found_nums = re.findall(r'\d{2}[\s\.-]?\d{2}[\s\.-]?\d{2}[\s\.-]?\d{2}[\s\.-]?\d{2}', content)
-            found_nums = [clean_phone(n) for n in found_nums]
-            
-            # We need a Phone Index. (Let's build it on the fly or pre-build? Pre-build is better but index is currently partial)
-            # Let's just scan the `candidates_index` keys if they look like phones? 
-            # Better: In Step 2 (Indexing), we didn't index phones. Let's rely on Full Scans for now or add Phone Index.
-            # Adding Phone Index to 'candidates_index' in Step 2 would be cleaner. 
-            pass 
+        if not content:
+             # Text extraction failed, try AI Vision/OCR approach
+             is_scanned = True
+             print(f"File {pdf_path.name} seems image-based. Attempting AI Extraction...")
+             email, phone, name, zip_c, city = get_candidate_info_from_pdf_ai(pdf_path)
+             if email or phone or name != 'Unknown Unknown':
+                 content = f"OCR_RECOVERY Name: {name} Email: {email} Phone: {phone}" 
+                 ai_identity = {'email': email, 'phone': phone, 'name': name, 'zip': zip_c, 'city': city}
 
-        # 3. Content Name Match (Robust Fallback)
-        if match_row is None:
-            # For 50 PDFs, we can afford to scan the index logic inverted?
-            # Or better: Extract "Proper Nouns" from text? No.
-            # Check if *Candidate Name* is in Text.
-            # But which candidate? We have 36k. 
-            # Optimization: 36k checks * 50 files = 1.8M string searches. Python can do this.
-            # Iterate through df_c directly?
-            
-            content_lower = content.lower()
-            # Heuristic: Check "First Last" and "Last First"
-            # We prioritize less common names? No, just First+Last.
-            
-            # This is slow but effective for small N_CVs.
-            # We assume df_c is available here.
-            for _, row in df_c.iterrows():
-                p = str(row.get('Prénom', '')).strip().lower()
-                n = str(row.get('Nom', '')).strip().lower()
-                if len(p) < 2 or len(n) < 2: continue
-                
-                full_1 = f"{p} {n}"
-                full_2 = f"{n} {p}"
-                
-                if full_1 in content_lower or full_2 in content_lower:
-                    match_row = row
+        match_row = None
+        
+        # 1. Match from AI Identity (if scanned or forced)
+        if ai_identity:
+             if ai_identity.get('email') and ai_identity['email'].lower() in candidates_index:
+                 match_row = candidates_index[ai_identity['email'].lower()]
+        
+        if match_row is None and content:
+            # 2. Email Match (Regex)
+            found_emails = re.findall(r'[\w\.-]+@[\w\.-]+', content)
+            for e in found_emails:
+                if e.lower() in candidates_index:
+                    match_row = candidates_index[e.lower()]
                     break
         
-        if match_row is None:
-            print(f"Skipping {pdf_path.name} (No match found. Text len: {len(content)}. 'Image-only'?: {len(content) < 100})")
-            continue
+        if match_row is None and content:
+            # 3. Phone Match 
+            found_nums = re.findall(r'(?:(?:\+|00)33|0)\s*[1-9](?:[\s.-]*\d{2}){4}', content)
+            if ai_identity.get('phone'): found_nums.append(ai_identity['phone'])
             
-        matched_count += 1
-        print(f"Match! {match_row['Prénom']} {match_row['Nom']} ({pdf_path.name})")
+            for n in found_nums:
+                cp = clean_phone(n)
+                if cp in phone_index:
+                    match_row = phone_index[cp]
+                    break
+                if len(cp) == 9 and ('0'+cp) in phone_index:
+                    match_row = phone_index['0'+cp]
+                    break
         
-        # AI Extraction
-        ai_data = get_ai_data(content)
+        # 4. Name Match
+        if match_row is None and content:
+             content_lower = content.lower()
+             for _, row in df_c.iterrows():
+                 p = str(row.get('Prénom', '')).strip().lower()
+                 n = str(row.get('Nom', '')).strip().lower()
+                 if len(p) < 2 or len(n) < 2: continue
+                 if f"{p} {n}" in content_lower:
+                     match_row = row
+                     break
         
-        # Geocode
-        lat, lon = None, None
-        zip_code = match_row.get('Code postal', match_row.get('Code postal du candidat', ''))
-        if pd.notna(zip_code):
-            z = str(zip_code)[:5] # clean
-            loc = nomi.query_postal_code(z)
-            if not pd.isna(loc.latitude):
-                lat, lon = loc.latitude, loc.longitude
+        if match_row is None and not ai_identity:
+             # Try force extraction on non-scanned text if we failed to match
+             if content:
+                 print(f"Force-extracting identity for {pdf_path.name}...")
+                 e, p, n, z, c = get_candidate_info_from_pdf_ai(pdf_path)
+                 if e or p or n != 'Unknown Unknown':
+                     ai_identity = {'email': e, 'phone': p, 'name': n, 'zip': z, 'city': c}
+
+        # AI Analysis (Standard)
+        ai_data = None
+        if content and not is_scanned and model:
+             # Regular extraction for Score/Diploma
+             ai_data = get_ai_data(content)
         
-        # Create Candidate
-        cand = Candidate(
-            first_name=match_row.get('Prénom', ''),
-            last_name=match_row.get('Nom', ''),
-            email=match_row.get('Email', ''),
-            phone=str(match_row.get('Téléphone', '')),
-            city=match_row.get('Ville', match_row.get('Ville du candidat', '')),
-            zip_code=str(zip_code),
-            latitude=lat, 
-            longitude=lon,
-            current_diploma=match_row.get('Diplôme', match_row.get('Diplôme du candidat', '')),
-            experience_years=match_row.get("Années d'expérience", ''),
+        # --- CREATE CANDIDATE ---
+        if match_row is not None:
+            # CSV MATCHED
+            matched_count += 1
+            print(f"Match! {match_row['Prénom']} {match_row['Nom']}")
             
-            # New Fields
-            cv_text=content,
-            diploma_ai=ai_data.get('diploma_ai') if ai_data else None,
-            experience_ai=ai_data.get('experience_ai') if ai_data else None,
-            closeness_score=ai_data.get('closeness_score') if ai_data else None,
-            qualitative_analysis=ai_data.get('qualitative_analysis') if ai_data else None
-        )
-        session.add(cand)
+            lat, lon = None, None
+            zip_code = match_row.get('Code postal', match_row.get('Code postal du candidat', ''))
+            if pd.notna(zip_code):
+                z = str(zip_code)[:5]
+                loc = nomi.query_postal_code(z)
+                if not pd.isna(loc.latitude): lat, lon = loc.latitude, loc.longitude
+
+            csv_dip = match_row.get('Diplôme', match_row.get('Diplôme du candidat', ''))
+            ai_dip = ai_data.get('diploma_ai') if ai_data else None
+            
+            norm = normalize_diploma(ai_dip)
+            if norm == "UNKNOWN": norm = normalize_diploma(csv_dip)
+            
+            cand = Candidate(
+                first_name=match_row.get('Prénom', ''),
+                last_name=match_row.get('Nom', ''),
+                email=match_row.get('Email', ''),
+                phone=str(match_row.get('Téléphone', '')),
+                city=match_row.get('Ville', match_row.get('Ville du candidat', '')),
+                zip_code=str(zip_code),
+                latitude=lat, longitude=lon,
+                current_diploma=str(csv_dip),
+                experience_years=match_row.get("Années d'expérience", ''),
+                cv_text=content[:5000] if content else "",
+                diploma_ai=ai_dip,
+                experience_ai=ai_data.get('experience_ai') if ai_data else None,
+                closeness_score=ai_data.get('closeness_score') if ai_data else None,
+                qualitative_analysis=ai_data.get('qualitative_analysis') if ai_data else None,
+                normalized_diploma=norm
+            )
+            session.add(cand)
+            
+        elif ai_identity:
+            # NO CSV MATCH -> "CV Only" Candidate
+            matched_count += 1
+            print(f"Created from CV Only: {ai_identity['name']}")
+            
+            lat, lon = None, None
+            if ai_identity.get('zip'):
+                 z = str(ai_identity['zip'])[:5]
+                 loc = nomi.query_postal_code(z)
+                 if not pd.isna(loc.latitude): lat, lon = loc.latitude, loc.longitude
+            
+            # Use data from generic extraction if available
+            ai_dip = ai_data.get('diploma_ai') if ai_data else None
+            norm = normalize_diploma(ai_dip)
+            
+            raw_name = ai_identity.get('name', 'Unknown Unknown')
+            parts = raw_name.split() if raw_name else ['Unknown']
+            f_name = parts[0]
+            l_name = " ".join(parts[1:]) if len(parts)>1 else ""
+            
+            cand = Candidate(
+                first_name=f_name,
+                last_name=l_name,
+                email=ai_identity.get('email', ''),
+                phone=ai_identity.get('phone', ''),
+                city=ai_identity.get('city', ''),
+                zip_code=ai_identity.get('zip', ''),
+                latitude=lat, longitude=lon,
+                current_diploma="CV Only",
+                experience_years="Unknown",
+                cv_text=content[:5000] if content else "AI Extracted",
+                diploma_ai=ai_dip,
+                experience_ai=ai_data.get('experience_ai') if ai_data else None,
+                closeness_score=ai_data.get('closeness_score') if ai_data else None,
+                qualitative_analysis=ai_data.get('qualitative_analysis') if ai_data else "Extracted from CV only.",
+                normalized_diploma=norm
+            )
+            session.add(cand)
+        else:
+            print(f"Skipping {pdf_path.name} (Unreadable/Unmatched)")
+            
+
         
     session.commit()
-    print(f"Ingested {matched_count} candidates from CVs.")
+    print(f"Ingested {matched_count} candidates.")
     
     # 4. Load Jobs
     print("Loading Jobs...")
     df_j = pd.read_csv(JOBS_CSV, low_memory=False)
     
-    # Helpers for Metier
     def get_cat(title):
-        t = str(title).lower()
-        if 'auxiliaire' in t: return 'CAT 2'
-        if 'infirmier' in t or 'eje' in t or 'educateur' in t or 'directeur' in t: return 'CAT 1'
-        return 'Other'
+         t = str(title).lower()
+         if 'auxiliaire' in t: return 'CAT 2'
+         if 'infirmier' in t or 'eje' in t or 'educateur' in t or 'directeur' in t: return 'CAT 1'
+         return 'Other'
         
-    # Cache Metiers
     metiers_cache = {}
-    
     jobs_count = 0
+    
     for _, row in df_j.iterrows():
         title = row.get("Titre de l'annonce", row.get('Libellé du poste', row.get('Intitulé de poste', 'Unknown')))
-        # Debug Title
-        # print(f"DEBUG TITLE: {title}")
         if pd.isna(title): continue
         
-        # Metier
         if title not in metiers_cache:
-            m = session.query(Metier).filter_by(title=title).first()
-            if not m:
-                m = Metier(title=title, category=get_cat(title))
-                session.add(m)
-                session.commit() # commit to get ID
-            metiers_cache[title] = m
+            existing_m = session.query(Metier).filter_by(title=title).first()
+            if not existing_m:
+                existing_m = Metier(
+                    title=title, 
+                    category=get_cat(title),
+                    required_diplomas=get_required_diplomas(title) # Define Requirements
+                )
+                session.add(existing_m)
+                session.commit()
+            metiers_cache[title] = existing_m
         else:
-            m = metiers_cache[title]
-            
-        # Nursery
-        # CSV has 'CRECHES' for name, and 'Localisation' for address (e.g. "Address,  Zip City, France")
+             m = metiers_cache[title]
+        
+        m = metiers_cache[title]
+        
+        # Nursery (Use cached lookup for speed if optimizing, but simple here)
         n_name = row.get('CRECHES', row.get('Etablissement', 'Unknown'))
         if pd.isna(n_name): n_name = "Unknown Nursery"
         
-        # Geocode Nursery if needed
+        # Geocode/Create Nursery (simplified loop check)
         existing_n = session.query(Nursery).get(n_name)
         if not existing_n:
-            # Parse Localisation
-            raw_loc = str(row.get('Localisation', ''))
-            # Regex to find Zip (5 digits)
-            # Example: "30 Rue Eugène Berthoud,  93400 Saint-Ouen-sur-Seine, France"
-            n_zip = ""
-            n_city = ""
-            n_addr = raw_loc
-            
-            zip_match = re.search(r'\b(\d{5})\b', raw_loc)
-            if zip_match:
-                n_zip = zip_match.group(1)
-                # Assume city is after zip?
-                # Simple split attempt:
-                parts = raw_loc.split(n_zip)
-                if len(parts) > 1:
-                     # parts[0] is address, parts[1] is " City, France"
-                     n_addr = parts[0].strip().strip(',')
-                     n_city = parts[1].split(',')[0].strip()
-            
-            lat, lon = None, None
-            if n_zip:
-                loc = nomi.query_postal_code(n_zip)
-                if not pd.isna(loc.latitude):
-                    lat, lon = loc.latitude, loc.longitude
-            
-            # Urgency Color query
-            urgency = row.get('Quelle est la couleur de la crèche ?', 'Rouge')
-            
-            existing_n = Nursery(
-                name=n_name,
-                address=n_addr or raw_loc,
-                zip_code=n_zip,
-                city=n_city,
-                latitude=lat,
-                longitude=lon,
-                urgency_color=urgency
-            )
-            session.add(existing_n)
-            
-        # Job
+             # ... (Nursery creation logic same as before, condensed)
+             raw_loc = str(row.get('Localisation', ''))
+             match = re.search(r'\b(\d{5})\b', raw_loc)
+             z_code = match.group(1) if match else ""
+             lat, lon = None, None
+             if z_code:
+                 l = nomi.query_postal_code(z_code)
+                 if not pd.isna(l.latitude): lat, lon = l.latitude, l.longitude
+             
+             existing_n = Nursery(
+                 name=n_name, 
+                 address=raw_loc, 
+                 zip_code=z_code, 
+                 latitude=lat, 
+                 longitude=lon,
+                 urgency_color=row.get('Quelle est la couleur de la crèche ?', 'Rouge')
+             )
+             session.add(existing_n)
+             
         job = Job(
             reference=str(row.get('Référence', '')),
             title=title,

@@ -40,18 +40,67 @@ def get_jobs_for_nursery(nursery_name):
 
 # --- Main App ---
 
-st.title("🗺️ Grandir Nursery Map")
+# --- Custom CSS ---
+st.markdown("""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+    
+    html, body, [class*="css"]  {
+        font-family: 'Inter', sans-serif;
+        color: #2C3E50;
+    }
+    
+    h1, h2, h3 {
+        color: #002B5B;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+    }
+    
+    .stDataFrame {
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        border: 1px solid #E5E7EB;
+        border-radius: 6px;
+    }
+    
+    /* Sidebar */
+    [data-testid="stSidebar"] {
+        background-color: #F8F9FA;
+        border-right: 1px solid #E5E7EB;
+    }
+    
+    /* Metrics/Cards (if any) */
+    div[data-testid="metric-container"] {
+        background-color: white;
+        border: 1px solid #E5E7EB;
+        padding: 15px;
+        border-radius: 6px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("Grandir Central Command")
 
 # 1. Sidebar Controls
 with st.sidebar:
-    st.header("Settings")
-    max_dist = st.slider("Max Distance (km)", 0, 50, 20)
-    urgency_filter = st.multiselect("Nursery Urgency", ["Rouge", "Orange", "Verte"], default=["Rouge", "Orange"])
-    st.divider()
-    st.info("💡 AI Features: Candidates require a linked CV and API Key.")
+    st.header("Search Filters")
+    urgency_filter = st.multiselect(
+        "Urgency Level",
+        options=['Rouge', 'Orange', 'Vert', 'Jaune', 'Bleu'],
+        default=['Rouge', 'Orange']
+    )
+    
+    max_dist = st.slider("Max Distance (km)", 5, 50, 20)
+    
+    # Filter Nurseries
+    # (Existing Logic)
 
 # 2. Map
 df_nurseries = load_nurseries()
+
+# Filter Nurseries
+if urgency_filter:
+    pattern = '|'.join([u.lower() for u in urgency_filter])
+    df_nurseries = df_nurseries[df_nurseries['urgency_color'].str.lower().str.contains(pattern, na=False)]
 
 # Defaults
 if 'selected_nursery_name' not in st.session_state:
@@ -124,12 +173,12 @@ if target_candidate is not None and selected_nursery:
     # ISOLATED VIEW: Nursery + Candidate + Line
     map_markers.append({
         'lat': selected_nursery.latitude, 'lon': selected_nursery.longitude,
-        'popup': selected_nursery.name, 'color': 'red', 'icon': 'home'
+        'popup': selected_nursery.name, 'color': 'red', 'icon': 'building'
     })
     map_markers.append({
         'lat': target_candidate['latitude'], 'lon': target_candidate['longitude'],
         'popup': f"{target_candidate['first_name']} {target_candidate['last_name']}",
-        'color': 'blue', 'icon': 'user'
+        'color': 'blue', 'icon': 'person'
     })
     map_lines.append([
         (selected_nursery.latitude, selected_nursery.longitude),
@@ -149,9 +198,9 @@ else:
         if 'rouge' in str(row['urgency_color']).lower(): color = 'red'
         elif 'orange' in str(row['urgency_color']).lower(): color = 'orange'
         
-        icon = 'home'
+        icon = 'building'
         if st.session_state['selected_nursery_name'] == row['name']:
-            color = 'blue'; icon = 'star'
+            color = 'blue'; icon = 'map-pin'
             
         map_markers.append({
             'lat': row['latitude'], 'lon': row['longitude'],
@@ -182,30 +231,63 @@ if output['last_object_clicked_popup'] and target_candidate is None:
 # --- Drill Down Section ---
 if st.session_state['selected_nursery_name']:
     selected_nursery_name = st.session_state['selected_nursery_name']
-    st.markdown(f"### 📍 {selected_nursery_name}")
+    st.divider()
+    st.markdown(f"### {selected_nursery_name}")
     
     # Jobs
     jobs = get_jobs_for_nursery(selected_nursery_name)
+    
+    selected_job_requirements = []
+    
     if not jobs:
         st.warning("No active jobs.")
         job_options = {}
     else:
+        # Create Options dict
         job_options = {f"{j.title} ({j.reference})": j for j in jobs}
-        s_job = st.selectbox("Position:", list(job_options.keys()))
         
+        # Select Box
+        # Key is crucial for state? No, standard is fine.
+        s_job_key = st.selectbox("Position", list(job_options.keys()))
+        s_job = job_options[s_job_key]
+        
+        # Get Requirements for filtering
+        import json
+        try:
+             reqs = json.loads(s_job.metier.required_diplomas) if s_job.metier and s_job.metier.required_diplomas else []
+             selected_job_requirements = reqs
+        except:
+             selected_job_requirements = []
+
     # Candidates Table
     if candidates_for_nursery is not None:
-        st.markdown("### 🎓 Candidates")
+        st.markdown(f"### Candidates ({len(candidates_for_nursery)} nearby)")
         
-        # Unified Diploma
-        def get_display_diploma(row):
-            dip_ai = str(row.get('diploma_ai', '')).strip()
-            dip_man = str(row.get('current_diploma', '')).strip()
-            if dip_ai and dip_ai.lower() != 'none': return dip_ai
-            return dip_man
-        
+        # --- FILTERING LOGIC ---
         df_view = candidates_for_nursery.copy()
+        
+        # Unified Diploma Display (Use Normalized or nice string)
+        def get_display_diploma(row):
+            norm = str(row.get('normalized_diploma', 'UNKNOWN'))
+            if norm != "UNKNOWN": return norm
+            # Fallback
+            dip_ai = str(row.get('diploma_ai', '')).strip()
+            if dip_ai and dip_ai.lower() != 'none': return dip_ai
+            return str(row.get('current_diploma', ''))
+            
         df_view['Display Diploma'] = df_view.apply(get_display_diploma, axis=1)
+        
+        # Apply Job Filter
+        if selected_job_requirements:
+            st.caption(f"Filtering for: {', '.join(selected_job_requirements)}")
+            # Filter
+            df_view = df_view[df_view['normalized_diploma'].isin(selected_job_requirements)]
+            
+            if df_view.empty:
+                st.warning("No candidates found matching the specific diploma requirements for this job.")
+        else:
+            st.caption("No specific diploma requirements found for this job position.")
+            
         df_view['Full Name'] = df_view['first_name'] + " " + df_view['last_name']
         df_view['Contact'] = df_view['email'] + " / " + df_view['phone']
         df_view['Dist'] = df_view['distance_km'].apply(lambda x: f"{x:.1f} km")
@@ -224,7 +306,7 @@ if st.session_state['selected_nursery_name']:
         
         # Candidate Selector for Map Isolation
         st.write("---")
-        st.write("#### 🔍 Focus View")
+        st.markdown("#### Focus View")
         
         # We use a selectbox that updates session state
         # Add a "None" option to clear selection
@@ -243,7 +325,7 @@ if st.session_state['selected_nursery_name']:
                  current_idx = matches.index[0]
         
         selected_idx_in_ui = st.selectbox(
-            "Select a candidate to isolate on map:", 
+            "Select a candidate to isolate on map", 
             cand_options, 
             format_func=format_cand,
             index=cand_options.index(current_idx) if current_idx in cand_options else 0,

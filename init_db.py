@@ -12,6 +12,7 @@ class Metier(Base):
     title = Column(String, unique=True, nullable=False)
     category = Column(String) # CAT 1, CAT 2 etc.
     prerequisites = Column(Text) # JSON or Text description of diplomas
+    required_diplomas = Column(String) # Standardized List (JSON string e.g. "['DE_INFIRMIER']")
 
     jobs = relationship("Job", back_populates="metier")
 
@@ -64,6 +65,9 @@ class Candidate(Base):
     experience_ai = Column(String) # Extracted Years of Experience
     closeness_score = Column(Integer) # 0-100 Score
     qualitative_analysis = Column(Text) # LLM Explanation
+    
+    # Unified Standard
+    normalized_diploma = Column(String) # DE_INFIRMIER, DE_EJE, etc.
     
     applications = relationship("Application", back_populates="candidate")
 
