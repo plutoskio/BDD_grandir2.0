@@ -19,10 +19,11 @@ JOBS_CSV = 'jobs_fresh.csv'
 CV_DIR = 'export_cv (1)'  # User's folder name
 
 # Configure Gemini
-API_KEY = os.environ.get("GOOGLE_API_KEY")
+# Configure Gemini
+API_KEY = "AIzaSyCIOqxQau7Wsaqctzu4Qf4iADb1zUKbb8w"
 if API_KEY:
     genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel('gemini-2.0-flash-exp')
+    model = genai.GenerativeModel('gemini-2.0-flash-exp') # Updated model too
 else:
     print("WARNING: GOOGLE_API_KEY not found. AI extraction will be skipped.")
     model = None
@@ -112,13 +113,14 @@ def get_ai_data(cv_text, job_context="Recruitment"):
     prompt = f"""
     You are an expert recruiter. Analyze the following CV text.
     Extract the following information in JSON format:
-    1. "diploma_ai": The highest relevant diploma for childcare (e.g., "Infirmier", "CAP AEPE", "EJE", "Auxiliaire de Puériculture"). If none, return "None".
-    2. "experience_ai": Total years of experience in childcare/health sector as a number or string (e.g. "5 years").
-    3. "closeness_score": A score from 0 to 100 on how well this candidate fits a general childcare role based on stability and relevant experience.
-    4. "qualitative_analysis": A 1-sentence explanation of the score.
+    1. "diplomas_list": A list of ALL diplomas/certificates found (e.g. ["Bac Pro ASSP", "CAP Petite Enfance", "BAFA"]).
+    2. "diploma_ai": The SINGLE highest diploma relevant for childcare (e.g. "DE EJE").
+    3. "experience_ai": Total years of experience in childcare/health sector as a number or string (e.g. "5 years").
+    4. "closeness_score": A score from 0 to 100 on how well this candidate fits a general childcare role.
+    5. "qualitative_analysis": A 1-sentence explanation of the score.
 
     CV Text:
-    {cv_text[:3000]}
+    {cv_text[:5000]}
     """
     
     try:
@@ -137,26 +139,67 @@ def get_ai_data(cv_text, job_context="Recruitment"):
         return None
 
 # --- Normalization Logic ---
+def normalize_diplomas(diploma_list):
+    """
+    Takes a list of strings (diplomas) and returns a list of Standardized Enums.
+    """
+    if not diploma_list: return []
+    if isinstance(diploma_list, str): diploma_list = [diploma_list]
+    
+    normalized = set()
+    
+    for d in diploma_list:
+        t = str(d).lower()
+        
+        # --- GROUP A: CAT 1 (High Qual) ---
+        if any(x in t for x in ['infirmier', 'ide', 'nurse', 'scienc', 'soins infirmiers']): 
+            normalized.add("DE_INFIRMIER")
+        if any(x in t for x in ['puericultrice', 'puéricultrice']) and not 'auxiliaire' in t:
+             normalized.add("DE_PUERICULTRICE")
+        if any(x in t for x in ['eje', 'educateur jeunes enfants', 'éducatrice de jeunes enfants', 'deeje']):
+             normalized.add("DE_EJE")
+        if any(x in t for x in ['psycho']):
+             normalized.add("PSYCHOLOGIE")
+             
+        # --- GROUP B: CAT 2 (Skilled) ---
+        # AP / Auxiliaire check - stricter
+        if 'auxiliaire' in t or 'deap' in t or 'pueri' in t:
+             # Exclude Puericultrice (handled above) if it's just "Auxiliaire"
+             normalized.add("DE_AUXILIAIRE_PUERICULTURE")
+        elif ' ap' in t or t.startswith('ap ') or t == 'ap': # " AP" or "AP " or "AP"
+             normalized.add("DE_AUXILIAIRE_PUERICULTURE")
+        elif 'aide soignante' in t:
+             normalized.add("OTHER_HEALTH")
+             
+        # CAP / AEPE
+        if 'aepe' in t or 'petite enfance' in t or 'accompagnant éducatif' in t:
+             normalized.add("CAP_AEPE")
+        elif 'cap' in t: # "CAP" is short, check context if needed, but often "CAP ..."
+             if "petite enfance" in t or "aepe" in t:
+                 normalized.add("CAP_AEPE")
+             # Else generic CAP? Ignoring for now to be safe
+             
+        # BAC ASSP
+        if 'assp' in t:
+             normalized.add("BAC_ASSP")
+        elif ('bac' in t or 'baccalauréat' in t) and ('accompagnement' in t):
+             normalized.add("BAC_ASSP")
+             
+        # BEP CSS
+        if 'css' in t or 'sanitaires et sociales' in t:
+             normalized.add("BEP_CSS")
+             
+        # --- GROUP C: Support ---
+        if 'bafa' in t: normalized.add("BAFA")
+        if 'advf' in t or 'vie aux familles' in t: normalized.add("TITRE_ADVF")
+        if 'meef' in t or "sciences de l'education" in t: normalized.add("TEACHING")
+
+    return list(normalized)
+
 def normalize_diploma(text):
-    if not text or pd.isna(text): return "UNKNOWN"
-    t = str(text).lower()
-    
-    # 1. INFIRMIER
-    if 'infirmier' in t or 'ide' in t or 'nurse' in t: return "DE_INFIRMIER"
-    
-    # 2. EJE
-    if 'eje' in t or 'educateur' in t or 'jeunes enfants' in t: return "DE_EJE"
-    
-    # 3. AUXILIAIRE
-    if 'auxiliaire' in t or 'ap' in t or 'deap' in t or 'pueri' in t: return "DE_AUXILIAIRE"
-    
-    # 4. CAP / AEPE
-    if 'cap' in t or 'aepe' in t or 'petite enfance' in t: return "CAP_AEPE"
-    
-    # 5. MANAGER / DIRECTEUR (If distinctive?)
-    # For now, Directeur usually requires EJE or Infirmier, but let's keep it simple.
-    
-    return "UNKNOWN"
+    # BACKWARD COMPATIBILITY WRAPPER
+    res = normalize_diplomas([text])
+    return res[0] if res else "UNKNOWN"
 
 def get_required_diplomas(job_title):
     t = str(job_title).lower()
@@ -300,11 +343,20 @@ def run_ingestion():
                 loc = nomi.query_postal_code(z)
                 if not pd.isna(loc.latitude): lat, lon = loc.latitude, loc.longitude
 
+            # Prepare Diploma Data
             csv_dip = match_row.get('Diplôme', match_row.get('Diplôme du candidat', ''))
             ai_dip = ai_data.get('diploma_ai') if ai_data else None
+            ai_dip_list = ai_data.get('diplomas_list', []) if ai_data else []
             
-            norm = normalize_diploma(ai_dip)
-            if norm == "UNKNOWN": norm = normalize_diploma(csv_dip)
+            # Normalize
+            norm_list = normalize_diplomas(ai_dip_list)
+            if not norm_list and csv_dip:
+                 # Fallback to CSV diploma if AI found nothing or failed
+                 norm_list = normalize_diplomas([csv_dip])
+            
+            # Legacy Single Norm (Keep for now)
+            norm_single = normalize_diploma(ai_dip)
+            if norm_single == "UNKNOWN": norm_single = normalize_diploma(csv_dip)
             
             cand = Candidate(
                 first_name=match_row.get('Prénom', ''),
@@ -321,7 +373,9 @@ def run_ingestion():
                 experience_ai=ai_data.get('experience_ai') if ai_data else None,
                 closeness_score=ai_data.get('closeness_score') if ai_data else None,
                 qualitative_analysis=ai_data.get('qualitative_analysis') if ai_data else None,
-                normalized_diploma=norm
+                normalized_diploma=norm_single,
+                diplomas_json=json.dumps(ai_dip_list),
+                normalized_diplomas=json.dumps(norm_list)
             )
             session.add(cand)
             
@@ -338,7 +392,10 @@ def run_ingestion():
             
             # Use data from generic extraction if available
             ai_dip = ai_data.get('diploma_ai') if ai_data else None
-            norm = normalize_diploma(ai_dip)
+            ai_dip_list = ai_data.get('diplomas_list', []) if ai_data else []
+            
+            norm_single = normalize_diploma(ai_dip)
+            norm_list = normalize_diplomas(ai_dip_list)
             
             raw_name = ai_identity.get('name', 'Unknown Unknown')
             parts = raw_name.split() if raw_name else ['Unknown']
@@ -360,7 +417,9 @@ def run_ingestion():
                 experience_ai=ai_data.get('experience_ai') if ai_data else None,
                 closeness_score=ai_data.get('closeness_score') if ai_data else None,
                 qualitative_analysis=ai_data.get('qualitative_analysis') if ai_data else "Extracted from CV only.",
-                normalized_diploma=norm
+                normalized_diploma=norm_single,
+                diplomas_json=json.dumps(ai_dip_list),
+                normalized_diplomas=json.dumps(norm_list)
             )
             session.add(cand)
         else:

@@ -268,8 +268,18 @@ if st.session_state['selected_nursery_name']:
         
         # Unified Diploma Display (Use Normalized or nice string)
         def get_display_diploma(row):
+            # Check for multiple normalized diplomas
+            norm_json = row.get('normalized_diplomas')
+            if norm_json:
+                try:
+                    norm_list = json.loads(norm_json)
+                    if norm_list: return ", ".join(norm_list)
+                except: pass
+            
+            # Fallback to single
             norm = str(row.get('normalized_diploma', 'UNKNOWN'))
             if norm != "UNKNOWN": return norm
+            
             # Fallback
             dip_ai = str(row.get('diploma_ai', '')).strip()
             if dip_ai and dip_ai.lower() != 'none': return dip_ai
@@ -280,8 +290,30 @@ if st.session_state['selected_nursery_name']:
         # Apply Job Filter
         if selected_job_requirements:
             st.caption(f"Filtering for: {', '.join(selected_job_requirements)}")
+            
+            def match_reqs(row):
+                # 1. Get Candidate Diplomas
+                cand_dips = set()
+                
+                # From List
+                try: 
+                    l = json.loads(row.get('normalized_diplomas', '[]'))
+                    cand_dips.update(l)
+                except: pass
+                
+                # From Single (Legacy/Fallback)
+                single = row.get('normalized_diploma')
+                if single and single != 'UNKNOWN': cand_dips.add(single)
+                
+                # 2. Check Intersection with Job Reqs
+                # Requirements are OR (Satisfied if candidate has ANY of the required)
+                # e.g. Job requires "DE_EJE" OR "DE_INFIRMIER"
+                reqs = set(selected_job_requirements)
+                
+                return not reqs.isdisjoint(cand_dips)
+
             # Filter
-            df_view = df_view[df_view['normalized_diploma'].isin(selected_job_requirements)]
+            df_view = df_view[df_view.apply(match_reqs, axis=1)]
             
             if df_view.empty:
                 st.warning("No candidates found matching the specific diploma requirements for this job.")

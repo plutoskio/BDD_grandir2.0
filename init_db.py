@@ -64,7 +64,11 @@ class Candidate(Base):
     diploma_ai = Column(String) # Extracted Diploma
     experience_ai = Column(String) # Extracted Years of Experience
     closeness_score = Column(Integer) # 0-100 Score
-    qualitative_analysis = Column(Text) # LLM Explanation
+    qualitative_analysis = Column(Text)
+    
+    # New Standardized Fields
+    diplomas_json = Column(Text) # Raw AI list: ["Bac", "BAFA"]
+    normalized_diplomas = Column(Text) # Standardized Enum List: ["BAFA", "BAC_ASSP"] # LLM Explanation
     
     # Unified Standard
     normalized_diploma = Column(String) # DE_INFIRMIER, DE_EJE, etc.

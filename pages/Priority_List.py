@@ -6,6 +6,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from init_db import Base, Nursery, Job, Candidate, Metier, Application
 
+st.set_page_config(page_title="Priority Worklist", page_icon="⚡", layout="wide")
+
 # DB Setup
 DB_URL = "sqlite:///grandir.db"
 engine = create_engine(DB_URL)
@@ -31,7 +33,6 @@ def haversine(lon1, lat1, lon2, lat2):
     r = 6371 # Radius of earth in kilometers. Use 3956 for miles
     return c * r
 
-
 @st.cache_data
 def load_data():
     # Load all needed data
@@ -46,26 +47,46 @@ def load_data():
     
     return jobs, candidates
 
+def get_diploma_list(row):
+    """Safe extraction of normalized diplomas list"""
+    try:
+        norm_json = row.get('normalized_diplomas')
+        if norm_json:
+            l = json.loads(norm_json)
+            if l: return l
+    except: pass
+    
+    # Fallback
+    single = row.get('normalized_diploma')
+    if single and single != 'UNKNOWN': return [single]
+    
+    return []
+
+# --- Custom CSS ---
+st.markdown("""
+<style>
+    .stDataFrame { border: 1px solid #ddd; }
+    .dip-tag {
+        background-color: #e0f2f1;
+        color: #00695c;
+        padding: 2px 8px;
+        border-radius: 12px;
+        font-size: 0.85em;
+        margin-right: 4px;
+        display: inline-block;
+        margin-bottom: 4px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("⚡ Priority Worklist")
+
 jobs_df, candidates_df = load_data()
 
 # Filters
 with st.sidebar:
     st.header("Search Filters")
-    # Job Filter (Fixing user issue)
-    # We want to filter generally? Or is this a global list?
-    # "Priority Call List" usually implies finding candidates for *specific* jobs.
-    # Let's add a Global Job Filter if easy, or just fix the matching logic first.
-    # The user said "when I change job opening positions". This implies they are on the Main Page or drilling down.
-    # BUT this file is `Priority_List.py`. It lists ALL priority matches.
-    # Maybe the user was referring to `app.py`? "notice how when I change job opening positions the candidate list doesnt change".
-    # THAT IS IN `app.py`.
-    # `Priority_List.py` generates a big table.
-    
-    # I should fix `app.py` for the "Job Filter" issue.
-    # I should fix `Priority_List.py` for the "Prerequisite Met" column logic.
-    pass
-
-max_dist = st.sidebar.slider("Max Distance (km)", 5, 50, 20)
+    max_dist = st.slider("Max Distance (km)", 5, 50, 20)
 
 matches = []
 open_jobs = jobs_df[jobs_df['status'] == 'Open']
@@ -97,16 +118,27 @@ with st.spinner("Calculating optimal matches..."):
             
             # Prereq Score (Standardized)
             p_score = 0
-            cand_norm = str(cand.get('normalized_diploma', 'UNKNOWN'))
             
-            if cand_norm != "UNKNOWN" and cand_norm in required_dips:
-                p_score = 1
-            elif not required_dips: 
-                # If no strict reqs, maybe it's open? Or strict No?
-                # Let's be lenient if job has no reqs defined?
+            # Get Candidate Diplomas Set
+            cand_dips = set()
+            try:
+                cand_dips.update(json.loads(cand.get('normalized_diplomas', '[]')))
+            except: pass
+            
+            # Fallback
+            single = str(cand.get('normalized_diploma', 'UNKNOWN'))
+            if single != 'UNKNOWN': cand_dips.add(single)
+            
+            # Check Match
+            if required_dips:
+                reqs_set = set(required_dips)
+                if not reqs_set.isdisjoint(cand_dips):
+                    p_score = 1
+            else:
                 pass
             
             matches.append({
+                'candidate_id': cand['id'], # For selection
                 'Candidate Name': f"{cand['first_name']} {cand['last_name']}",
                 'Candidate Phone': cand['phone'],
                 'Candidate Email': cand['email'],
@@ -127,15 +159,60 @@ if matches:
     
     display_cols = ['Urgency', 'Prerequisite Met', 'AI Score', 'Candidate Name', 'Candidate Phone', 'Job Title', 'Nursery', 'Distance']
     
-    st.dataframe(
-        df_m[display_cols],
+    st.info("Select a row to view full Candidate Profile details below.")
+    
+    selection = st.dataframe(
+        df_m[display_cols + ['candidate_id']], # Including ID for logic, but hiding it
         column_config={
             "Urgency": st.column_config.Column("Urgency", width="small"),
             "AI Score": st.column_config.NumberColumn("Match /10", format="%.2f"),
-            "Distance": st.column_config.NumberColumn("Dist (km)", format="%.1f")
+            "Distance": st.column_config.NumberColumn("Dist (km)", format="%.1f"),
+            "candidate_id": None # Hide ID
         },
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row"
     )
+    
+    # --- Detail View Logic ---
+    if selection.selection and selection.selection.rows:
+        idx = selection.selection.rows[0]
+        # Get ID from the sorted dataframe
+        # Note: df_m is Sorted. selection.rows[0] is the index in the SORTED (displayed) view.
+        selected_cand_id = df_m.iloc[idx]['candidate_id']
+        
+        # Get Full Candidate Row
+        selected_row = candidates_df.loc[candidates_df['id'] == selected_cand_id].iloc[0]
+        
+        st.divider()
+        st.markdown(f"## 👤 {selected_row['first_name']} {selected_row['last_name']}")
+        
+        c1, c2 = st.columns([1, 2])
+        
+        with c1:
+            st.markdown(f"**📍 Location:** {selected_row['city']} ({selected_row['zip_code']})")
+            st.markdown(f"**📧 Email:** {selected_row['email']}")
+            st.markdown(f"**📱 Phone:** {selected_row['phone']}")
+            
+            exp_ai = selected_row.get('experience_ai', 'Unknown')
+            st.info(f"**Experience:** {exp_ai}")
+
+        with c2:
+            st.markdown("### 🎓 Qualifications")
+            
+            dips = get_diploma_list(selected_row)
+            if dips:
+                html = "".join([f"<span class='dip-tag'>{d}</span>" for d in dips])
+                st.markdown(f"<div>{html}</div>", unsafe_allow_html=True)
+            else:
+                st.write("No standardized diplomas.")
+                
+            st.markdown("### 🤖 Qualitiative Analysis")
+            st.write(selected_row.get('qualitative_analysis', 'No analysis available.'))
+            
+            with st.expander("📄 View Raw CV Text"):
+                st.text(selected_row.get('cv_text', ''))
+
 else:
     st.info("No matches found within criteria.")
