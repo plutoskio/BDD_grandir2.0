@@ -2,3 +2,7 @@ google-generativeai
 pypdf
 python-dotenv
 pandas
+streamlit
+folium
+streamlit-folium
+watchdog
