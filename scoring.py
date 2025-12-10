@@ -9,10 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure Gemini
-# NOTE: Using process environment variable for API key. 
-# Ensure GOOGLE_API_KEY is set in the environment where this runs.
 if "GOOGLE_API_KEY" not in os.environ:
-    # Fallback or error - for now assume it helps key not being found to fail fast
     print("WARNING: GOOGLE_API_KEY not found in environment.")
 
 genai.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
@@ -61,83 +58,101 @@ def extract_experience_and_skills(summary_text):
         print(f"Error extracting with AI: {e}")
         return 0, []
 
-def calculate_diploma_score(candidate_diplomas, role_category):
-    """
-    Calculates a score (0-100) based on diploma match.
-    Logic:
-    - CAT 1 requires specific diplomas (EJE, Auxiliaire de Puériculture, Infirmière, Psychomotricien).
-    - CAT 2 requires CAP AEPE or similar.
-    - If candidate has HIGHER qualification than required, full score.
-    - If candidate matches, full score.
-    - If partial/related, partial score.
-    """
-    # Simply flatten diploma list for checking
+def calculate_diploma_score(candidate_diplomas, required_category):
     diploma_str = " ".join([d['diploma_name'] for d in candidate_diplomas]).lower()
     
-    # Define keywords
-    cat1_keywords = ["educatrice de jeunes enfants", "eje", "auxiliaire de puériculture", "ap", "infirmière", "infirrnier", "psychomotricien", "puéricultrice"]
-    cat2_keywords = ["cap", "aepe", "petite enfance", "bep", "bac pro assp", "titre professionnel"]
+    if not required_category:
+        return 5.0 
+        
+    req = required_category.upper().strip()
     
-    has_cat1 = any(k in diploma_str for k in cat1_keywords)
-    has_cat2 = any(k in diploma_str for k in cat2_keywords)
-
-    if role_category == "CAT 1":
-        if has_cat1: return 100
-        if has_cat2: return 40 # Has some childcare qual but not the right one
-        return 0
-    elif role_category == "CAT 2":
-        if has_cat1: return 100 # Overqualified is good
-        if has_cat2: return 100
-        return 20 # Maybe has experience but no diploma
-    else: # CAT 3 or unspecified
-        if has_cat1 or has_cat2: return 100
-        return 50 # General entry level
+    has_eje = "educateur" in diploma_str or "eje" in diploma_str
+    has_ap = "auxiliaire" in diploma_str or "puériculture" in diploma_str or "ap" in diploma_str
+    has_cap = "cap" in diploma_str or "aepe" in diploma_str or "petite enfance" in diploma_str
+    has_ide = "infirmier" in diploma_str or "infirmière" in diploma_str or "ide" in diploma_str
+    
+    # 0-10 Scale
+    score = 0.0
+    
+    if req == "EJE":
+        if has_eje: score = 10.0
+        elif has_ap: score = 4.0
+        elif has_cap: score = 2.0
+        
+    elif req == "AP":
+        if has_ap: score = 10.0
+        elif has_eje or has_ide: score = 10.0
+        elif has_cap: score = 5.0
+        
+    elif req == "CAP" or req == "NONE":
+        if has_cap or has_ap or has_eje: score = 10.0
+        else: score = 3.0
+        
+    elif req == "IDE":
+        if has_ide: score = 10.0
+        else: score = 1.0
+        
+    elif req == "PSY":
+        if "psy" in diploma_str: score = 10.0
+        else: score = 1.0
+        
+    else:
+        if has_cap or has_ap or has_eje: score = 8.0
+        else: score = 2.0
+        
+    return score
 
 def calculate_skills_score(skills, summary_text):
     """
-    Heuristic scoring for skills quality.
-    Realistically this would compare against job description, but we want a general candidate quality score here.
+    More variance:
+    - Base 2.0
+    - +1 for every 2 generic skills?
+    - +2 for strong keywords
     """
     if not skills and not summary_text:
-        return 50 # Neutral
+        return 2.0
     
-    score = 70 # Base good score
+    score = 2.0 # Low base
     
-    # Bonus for key terms
-    good_keywords = ["patience", "douceur", "équipe", "motivation", "dynamique", "autonomie", "bienveillance"]
-    text_blob = (summary_text + " " + " ".join(skills)).lower()
+    summary_lower = str(summary_text).lower()
     
-    matches = sum(1 for k in good_keywords if k in text_blob)
-    score += (matches * 5)
+    # Core Childcare Keywords (High Value)
+    core_keywords = ["douceur", "patience", "sécurité", "hygiène", "éveil", "bienveillance"]
+    matches_core = sum(1 for k in core_keywords if k in summary_lower)
+    score += (matches_core * 1.5)
     
-    return min(100, score)
+    # Soft Skill Keywords (Medium Value)
+    soft_keywords = ["équipe", "autonomie", "dynamique", "relationnel", "communication", "écoute"]
+    matches_soft = sum(1 for k in soft_keywords if k in summary_lower)
+    score += (matches_soft * 0.5)
+    
+    # Skills List Length Bonus
+    if skills:
+        score += min(3.0, len(skills) * 0.5)
+        
+    return min(10.0, score)
 
 def update_scores():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 1. Update Candidates with Experience/Skills if missing
-    print("--- 1. Enriching Candidates ---")
+    print("--- 1. Enriching Candidates (AI) ---")
     candidates = cursor.execute("SELECT candidate_id, ai_summary, years_of_experience FROM dim_candidates").fetchall()
     
     for cand in candidates:
         cid = cand['candidate_id']
-        summary = cand['ai_summary']
         current_exp = cand['years_of_experience']
         
-        # Only run AI if we haven't already (or simple check if null)
-        if current_exp is None and summary:
+        if current_exp is None and cand['ai_summary']:
             print(f"Enriching Candidate {cid}...")
-            years, skills = extract_experience_and_skills(summary)
+            years, skills = extract_experience_and_skills(cand['ai_summary'])
             cursor.execute("UPDATE dim_candidates SET years_of_experience = ?, extracted_skills = ? WHERE candidate_id = ?", 
                            (years, json.dumps(skills), cid))
             conn.commit()
-            time.sleep(10) # 10 RPM limit = 6s+ delay. Using 10s to be safe.
+            time.sleep(6) 
     
-    # 2. Calculate Application Scores
-    print("\n--- 2. Calculating Match Scores ---")
+    print("\n--- 2. Calculating Detailed Match Scores (0-10 Scale) ---")
     
-    # Join necessary tables
     query = """
     SELECT 
         a.application_id,
@@ -147,7 +162,7 @@ def update_scores():
         c.extracted_skills,
         c.ai_summary,
         p.role_id,
-        r.required_diploma_category -- Assuming checking dim_roles via posting is mostly implicit or we look at job CAT
+        r.required_diploma_category
     FROM fact_applications a
     JOIN dim_candidates c ON a.candidate_id = c.candidate_id
     JOIN fact_postings p ON a.posting_id = p.posting_id
@@ -159,48 +174,54 @@ def update_scores():
     for app in apps:
         aid = app['application_id']
         
-        # --- FACTOR 1: DISTANCE (30%) ---
-        dist = app['distance_km'] if app['distance_km'] is not None else 50
-        # Formula: 100 at 0km, 0 at 30km? Or gentler?
-        # Let's say: 100 - (distance * 3). 10km = 70. 30km = 10.
-        dist_score = max(0, 100 - (dist * 3))
+        # 1. DISTANCE (0-10)
+        dist = app['distance_km'] if app['distance_km'] is not None else 50.0
+        # 0km = 10, 30km = 0
+        score_dist = max(0.0, 10.0 - (dist * 0.33))
         
-        # --- FACTOR 2: EXPERIENCE (20%) ---
+        # 2. EXPERIENCE (0-10)
         exp = app['years_of_experience'] if app['years_of_experience'] is not None else 0
-        # 1 year = 20pts, 5 years = 100pts
-        exp_score = min(100, exp * 20)
+        # 5 years = 10 pts. 1 year = 2 pts.
+        score_exp = min(10.0, float(exp) * 2.0)
         
-        # --- FACTOR 3: DIPLOMA (30%) ---
-        # Get candidate diplomas
+        # 3. DIPLOMA (0-10)
         dips = cursor.execute("SELECT diploma_name FROM candidate_diplomas WHERE candidate_id = ?", (app['candidate_id'],)).fetchall()
-        # Simplification: Assume most postings in this dataset are CAT 2 or mix. 
-        # Ideally we read 'CAT' from posting context or role. 
-        # For now, let's assume robust matching logic isn't fully in DB yet, so heuristic:
-        # If posting role suggests "Auxiliaire" -> CAT 1. Else CAT 2.
-        # But wait, looking at file listings, 'job_reference' helps.
-        # Let's just use a general 'Quality of Qualification' score if specific CAT is missing.
-        # Queries show 'required_diploma_category' in dim_roles.
-        role_cat = app['required_diploma_category'] if app['required_diploma_category'] else "CAT 2" 
-        dip_score = calculate_diploma_score(dips, role_cat)
+        role_cat = app['required_diploma_category']
+        score_dip = calculate_diploma_score(dips, role_cat)
         
-        # --- FACTOR 4: SKILLS (20%) ---
+        # 4. SKILLS (0-10)
         skills = json.loads(app['extracted_skills']) if app['extracted_skills'] else []
-        skill_score = calculate_skills_score(skills, app['ai_summary'])
+        score_skills = calculate_skills_score(skills, app['ai_summary'])
         
-        # --- FINAL SCORE ---
-        final_score = (0.30 * dist_score) + (0.30 * dip_score) + (0.20 * exp_score) + (0.20 * skill_score)
+        # FINAL WEIGHTED SCORE
+        # Dist: 30%, Dip: 30%, Exp: 20%, Skill: 20%
+        raw_score = (0.3 * score_dist) + (0.3 * score_dip) + (0.2 * score_exp) + (0.2 * score_skills)
         
-        # --- VARIANCE & SCALING ---
-        # Round it, maybe add a tiny hash-based jitter if needed, but the inputs should be varied enough.
+        # --- PREREQUISITE PENALTY ---
+        # If diploma requirement is definitely not met (score < 5), crush the score.
+        final_score = raw_score
+        if score_dip < 4.5:
+             # Severe penalty for missing prerequisites
+             # Cap at 2.9 OR apply heavy multiplier
+             final_score = min(final_score * 0.3, 2.9)
+        
         final_score = round(final_score, 1)
         
-        print(f"App {aid} (C{app['candidate_id']}): Dist={dist_score:.1f}, Exp={exp_score}, Dip={dip_score}, Skill={skill_score} -> FINAL={final_score}")
+        print(f"App {aid}: D={score_dist:.1f} E={score_exp:.1f} Dip={score_dip:.1f} S={score_skills:.1f} -> Final={final_score}")
         
-        cursor.execute("UPDATE fact_applications SET match_score = ? WHERE application_id = ?", (final_score, aid))
+        cursor.execute("""
+            UPDATE fact_applications 
+            SET match_score = ?,
+                score_distance = ?,
+                score_experience = ?,
+                score_diploma = ?,
+                score_skills = ?
+            WHERE application_id = ?
+        """, (final_score, score_dist, score_exp, score_dip, score_skills, aid))
     
     conn.commit()
     conn.close()
-    print("Done.")
+    print("Scoring update complete.")
 
 if __name__ == "__main__":
     update_scores()
