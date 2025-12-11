@@ -245,9 +245,9 @@ def display_candidate_card(cand, nursery_context):
     # Header format depends on context
     # If Global List, show Role & Nursery in header
     if 'role_name' in cand:
-        header_text = f"👤 {cand['first_name']} {cand['last_name']} ({cand['role_name']} @ {cand.get('nursery_name', '')}) - Match: {score}%"
+        header_text = f"{cand['first_name']} {cand['last_name']} ({cand['role_name']} @ {cand.get('nursery_name', '')}) - Match: {score}%"
     else:
-        header_text = f"👤 {cand['first_name']} {cand['last_name']} - Match: {score}%"
+        header_text = f"{cand['first_name']} {cand['last_name']} - Match: {score}%"
 
     with st.expander(header_text):
         col1, col2 = st.columns([1, 2])
@@ -293,22 +293,22 @@ def display_candidate_card(cand, nursery_context):
             history = get_application_history(cand['candidate_id'], nursery_id_for_query)
             if not history.empty:
                 st.divider()
-                st.markdown("📜 **Other Applications**")
+                st.markdown("**Prior Applications**")
                 
                 status_groups = history.groupby('current_status')
                 for status, group in status_groups:
-                    st.caption(f"**Step: {status}**")
+                    st.caption(f"**Stage: {status}**")
                     for _, app in group.iterrows():
                         st.markdown(f"- **{app['role_name']}** @ {app['nursery_name']}")
                         st.caption(f"Date: {app['application_date']}")
             else:
                 st.divider()
-                st.caption("No other applications found.")
+                st.caption("No prior applications found.")
 
         # Column 2: Logistics Map
         with col2:
-            st.markdown("**🗺️ Logistics Map**")
-            st.caption("🔵 Candidate | 🔴 Target Nursery | 🟢 Closer Opportunities | ⚪ Other App")
+            st.markdown("**Logistics Map**")
+            st.caption(":blue[Candidate] | :red[Target Nursery] | :green[Closer Opportunities] | :grey[Other App]")
             
             cand_lat, cand_lon = cand.get('latitude'), cand.get('longitude')
             # Handle different field names if coming from different queries
@@ -360,10 +360,10 @@ def display_candidate_card(cand, nursery_context):
         cv_path = os.path.join("export_cv (1)", cand['cv_filename']) if cand.get('cv_filename') else None
         
         if cv_path and os.path.exists(cv_path):
-            if st.checkbox("📄 Show CV", key=f"show_cv_{cand['application_id']}"):
+            if st.checkbox("View CV", key=f"show_cv_{cand['application_id']}"):
                 with open(cv_path, "rb") as pdf_file:
                     st.download_button(
-                        label="⬇️ Download CV",
+                        label="Download CV",
                         data=pdf_file,
                         file_name=cand['cv_filename'],
                         mime='application/pdf',
@@ -378,7 +378,7 @@ def display_candidate_card(cand, nursery_context):
 
 def main():
     st.set_page_config(page_title="Grandir Central Command", layout="wide")
-    st.title("📍 Grandir Network Map")
+    st.title("Grandir Network Map")
 
     if 'selected_nursery' not in st.session_state:
         st.session_state['selected_nursery'] = None
@@ -388,10 +388,10 @@ def main():
     
     # Navigation
     st.sidebar.title("Navigation")
-    view = st.sidebar.radio("Go to", ["🗺️ Map View", "📋 All Candidates"])
+    view = st.sidebar.radio("Go to", ["Map View", "Global Candidates"])
     
     # --- VIEW: Map View ---
-    if view == "🗺️ Map View":
+    if view == "Map View":
         # Filters (Only visible in Map View)
         st.sidebar.divider()
         st.sidebar.header("Map Filters")
@@ -443,7 +443,8 @@ def main():
             nursery_data = get_nursery_details(nursery_id)
             
             st.divider()
-            st.header(f"🏥 Recruitment Dashboard: {nursery_data['nursery_name']}")
+            st.divider()
+            st.header(f"Recruitment Dashboard: {nursery_data['nursery_name']}")
             
             # Position Filter
             active_roles = get_active_roles(nursery_id)
@@ -473,12 +474,12 @@ def main():
                         display_candidate_card(cand, nursery_context)
 
     # --- VIEW: Global List ---
-    elif view == "📋 All Candidates":
+    elif view == "Global Candidates":
         # No sidebar filters here, or use defaults effectively meaning "All"
         # We fetch ALL urgency levels for the global list as per plan
         all_colors = ['red', 'orange', 'green']
         
-        st.header("📋 All Candidates (Global List)")
+        st.header("All Candidates (Global List)")
         st.caption("Sorted by Match Score (High to Low). Excludes closed positions.")
         
         all_candidates = get_all_applications_ranked(all_colors)
