@@ -38,7 +38,8 @@ def display_pdf(file_path):
     pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="1000" type="application/pdf"></iframe>'
     return pdf_display
 
-def load_nurseries_map_data():
+@st.cache_data(ttl=600)
+def load_nurseries_map_data(revision):
     """Loads nursery data for the main map."""
     conn = get_db_connection()
     query = """
@@ -110,7 +111,8 @@ def get_active_roles(nursery_id):
     conn.close()
     return df
 
-def get_candidates_for_position(nursery_id, role_id):
+@st.cache_data(ttl=600)
+def get_candidates_for_position(nursery_id, role_id, revision):
     conn = get_db_connection()
     query = """
     SELECT 
@@ -156,7 +158,8 @@ def get_closer_opportunities(candidate_lat, candidate_lon, target_dist, role_id)
              })
     return opportunities
 
-def get_application_history(candidate_id, current_nursery_id):
+@st.cache_data(ttl=600)
+def get_application_history(candidate_id, current_nursery_id, revision):
     conn = get_db_connection()
     query = """
     SELECT DISTINCT n.nursery_name, n.latitude, n.longitude, r.role_name, a.current_status, a.application_date
@@ -178,8 +181,12 @@ def update_application_status(application_id, new_status):
     )
     conn.commit()
     conn.close()
+    # Increment revision to invalidate cache
+    if 'data_revision' in st.session_state:
+        st.session_state['data_revision'] += 1
 
-def get_all_applications_ranked(selected_urgency_colors):
+@st.cache_data(ttl=600)
+def get_all_applications_ranked(selected_urgency_colors, revision):
     conn = get_db_connection()
     # Build dynamic placeholders for IN clause
     placeholders = ','.join(['?'] * len(selected_urgency_colors))
@@ -288,9 +295,9 @@ def display_candidate_card(cand, nursery_context):
             nursery_id_for_query = nursery_context.get('nursery_id', 0) 
             # If global list, cand['nursery_id'] might not be passed directly in nursery_context if it varies
             # But the query uses params. Let's rely on what we have.
-            # IN GLOBAL VIEW: nursery_context might be dynamic per row.
-            
-            history = get_application_history(cand['candidate_id'], nursery_id_for_query)
+            # History
+            nursery_id_for_query = nursery_context.get('nursery_id', 0)
+            history = get_application_history(cand['candidate_id'], nursery_id_for_query, st.session_state['data_revision'])
             if not history.empty:
                 st.divider()
                 st.markdown("**Prior Applications**")
@@ -382,9 +389,11 @@ def main():
 
     if 'selected_nursery' not in st.session_state:
         st.session_state['selected_nursery'] = None
+    if 'data_revision' not in st.session_state:
+        st.session_state['data_revision'] = 0
 
     # Load Main Data
-    df_nurseries = load_nurseries_map_data()
+    df_nurseries = load_nurseries_map_data(st.session_state['data_revision'])
     
     # Navigation
     st.sidebar.title("Navigation")
@@ -456,7 +465,7 @@ def main():
                 selected_role_id = role_options[selected_role_name]
                 
                 # Candidate List
-                candidates = get_candidates_for_position(nursery_id, selected_role_id)
+                candidates = get_candidates_for_position(nursery_id, selected_role_id, st.session_state['data_revision'])
                 
                 if candidates.empty:
                     st.info("No candidates found for this position.")
@@ -482,7 +491,7 @@ def main():
         st.header("All Candidates (Global List)")
         st.caption("Sorted by Match Score (High to Low). Excludes closed positions.")
         
-        all_candidates = get_all_applications_ranked(all_colors)
+        all_candidates = get_all_applications_ranked(all_colors, st.session_state['data_revision'])
         
         if all_candidates.empty:
             st.info("No active applications found.")
