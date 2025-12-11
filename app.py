@@ -386,25 +386,28 @@ def main():
     # Load Main Data
     df_nurseries = load_nurseries_map_data()
     
-    # filters
-    st.sidebar.header("Map Filters")
-    show_apps_only = st.sidebar.checkbox("Has Applications Only")
-    selected_colors = st.sidebar.multiselect(
-        "Urgency Levels",
-        options=['red', 'orange', 'green', 'gray'],
-        default=['red', 'orange', 'green', 'gray'],
-        format_func=lambda x: x.capitalize()
-    )
+    # Navigation
+    st.sidebar.title("Navigation")
+    view = st.sidebar.radio("Go to", ["🗺️ Map View", "📋 All Candidates"])
     
-    filtered_df = df_nurseries[df_nurseries['color'].isin(selected_colors)]
-    if show_apps_only:
-        filtered_df = filtered_df[filtered_df['application_count'] > 0]
+    # --- VIEW: Map View ---
+    if view == "🗺️ Map View":
+        # Filters (Only visible in Map View)
+        st.sidebar.divider()
+        st.sidebar.header("Map Filters")
+        show_apps_only = st.sidebar.checkbox("Has Applications Only")
+        selected_colors = st.sidebar.multiselect(
+            "Urgency Levels",
+            options=['red', 'orange', 'green', 'gray'],
+            default=['red', 'orange', 'green', 'gray'],
+            format_func=lambda x: x.capitalize()
+        )
+        
+        # Apply Filters
+        filtered_df = df_nurseries[df_nurseries['color'].isin(selected_colors)]
+        if show_apps_only:
+            filtered_df = filtered_df[filtered_df['application_count'] > 0]
 
-    # --- Tabs Layout ---
-    tab1, tab2 = st.tabs(["🗺️ Map View", "📋 All Candidates (Global List)"])
-
-    # --- TAB 1: Map View ---
-    with tab1:
         # Main Map
         m = folium.Map(location=PARIS_COORDS, zoom_start=DEFAULT_ZOOM)
         for _, row in filtered_df.iterrows():
@@ -469,14 +472,19 @@ def main():
                         }
                         display_candidate_card(cand, nursery_context)
 
-    # --- TAB 2: Global List ---
-    with tab2:
-        st.header(f"📋 Top Candidates (Based on Color Filters: {', '.join(selected_colors)})")
+    # --- VIEW: Global List ---
+    elif view == "📋 All Candidates":
+        # No sidebar filters here, or use defaults effectively meaning "All"
+        # We fetch ALL urgency levels for the global list as per plan
+        all_colors = ['red', 'orange', 'green']
         
-        all_candidates = get_all_applications_ranked(selected_colors)
+        st.header("📋 All Candidates (Global List)")
+        st.caption("Sorted by Match Score (High to Low). Excludes closed positions.")
+        
+        all_candidates = get_all_applications_ranked(all_colors)
         
         if all_candidates.empty:
-            st.info("No candidates found matching the selected urgency filters.")
+            st.info("No active applications found.")
         else:
             for _, cand in all_candidates.iterrows():
                 # For global list, we pass context from the row
