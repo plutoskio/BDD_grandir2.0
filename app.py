@@ -4,6 +4,8 @@ import sqlite3
 import folium
 from streamlit_folium import st_folium
 import math
+import base64
+import os
 
 # --- Configuration ---
 DB_PATH = "grandir.db"
@@ -28,6 +30,13 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
+
+def display_pdf(file_path):
+    """Generates an iframe to display a PDF."""
+    with open(file_path, "rb") as f:
+        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="1000" type="application/pdf"></iframe>'
+    return pdf_display
 
 def load_nurseries_map_data():
     """Loads nursery data for the main map."""
@@ -256,7 +265,7 @@ def main():
                             else:
                                 st.text("No AI Summary available.")
                                 
-                            st.markdown("[📄 View CV (Mock Link)](https://example.com)")
+
 
                         # Column 2: Logistics Map
                         with col2:
@@ -308,6 +317,27 @@ def main():
                                 st_folium(viz_map, width="100%", height=300, key=f"map_{cand['candidate_id']}")
                             else:
                                 st.warning("Candidate has no geocoded location.")
+
+                        # CV Display (Full Width)
+                        st.divider()
+                        cv_path = os.path.join("export_cv (1)", cand['cv_filename']) if cand.get('cv_filename') else None
+                        
+                        if cv_path and os.path.exists(cv_path):
+                            if st.checkbox("📄 Show CV", key=f"show_cv_{cand['candidate_id']}"):
+                                # Fallback download button
+                                with open(cv_path, "rb") as pdf_file:
+                                    st.download_button(
+                                        label="⬇️ Download CV",
+                                        data=pdf_file,
+                                        file_name=cand['cv_filename'],
+                                        mime='application/pdf',
+                                        key=f"dl_{cand['candidate_id']}"
+                                    )
+                                # Embed PDF
+                                pdf_html = display_pdf(cv_path)
+                                st.markdown(pdf_html, unsafe_allow_html=True)
+                        else:
+                            st.warning(f"CV file not found: {cand.get('cv_filename', 'Unknown')}")
 
 if __name__ == "__main__":
     main()
