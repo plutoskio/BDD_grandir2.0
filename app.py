@@ -133,8 +133,8 @@ def get_candidates_for_position(nursery_id, role_id, revision):
     conn.close()
     return df
 
-def get_closer_opportunities(candidate_lat, candidate_lon, target_dist, role_id):
-    """Finds other nurseries with SAME role OPEN that are CLOSER."""
+def get_better_opportunity(candidate_lat, candidate_lon, target_dist, role_id):
+    """Finds the SINGLE CLOSEST nursery with SAME role OPEN that is CLOSER than target_dist."""
     conn = get_db_connection()
     # Get all nurseries with open posting for this role
     query = """
@@ -156,7 +156,12 @@ def get_closer_opportunities(candidate_lat, candidate_lon, target_dist, role_id)
                  'longitude': row['longitude'],
                  'distance': dist
              })
-    return opportunities
+             
+    # Sort by distance (asc) and take the first one (closest)
+    if opportunities:
+        opportunities.sort(key=lambda x: x['distance'])
+        return opportunities[0] # Return the single best opportunity
+    return None
 
 @st.cache_data(ttl=600)
 def get_application_history(candidate_id, current_nursery_id, revision):
@@ -227,6 +232,7 @@ def get_all_applications_ranked(selected_urgency_colors, revision):
         n.longitude as nursery_lon,
 
         n.nursery_id,
+        p.role_id,
         r.role_name
     FROM fact_applications a
     JOIN dim_candidates c ON a.candidate_id = c.candidate_id
@@ -315,7 +321,7 @@ def display_candidate_card(cand, nursery_context):
         # Column 2: Logistics Map
         with col2:
             st.markdown("**Logistics Map**")
-            st.caption(":blue[Candidate] | :red[Target Nursery] | :green[Closer Opportunities] | :grey[Other App]")
+            st.caption(":blue[Candidate] | :red[Target Nursery] | :green[Better Opportunity] | :grey[Other App]")
             
             cand_lat, cand_lon = cand.get('latitude'), cand.get('longitude')
             # Handle different field names if coming from different queries
@@ -349,14 +355,43 @@ def display_candidate_card(cand, nursery_context):
                         icon=folium.Icon(color='gray', icon='history', prefix='fa')
                     ).add_to(viz_map)
 
-                # 4. Green: Closer Ops
+                # 4. Green: Better Opportunity (Single Closest)
                 # Need role_id. 
-                # In Map View: selected_role_id available.
-                # In Global View: cand['role_id'] (need to fetch it or generic?)
-                # Global view query selects role_name but not role_id? Let's assume passed in cand?
-                # For now simplify: If map view, show closer ops. If global, maybe skip or fetch.
-                # Let's verify if `role_id` is in cand. The new query doesn't select it.
-                # Just skip closer ops in global view for now to avoid errors, or fix query.
+                # In Map View: selected_role_id available? No, passed via context? 
+                # Wait, get_candidates_for_position returns joined columns. Does it select role_id?
+                # get_candidates_for_position query: "SELECT c.*, a.application_id..." 
+                # It does NOT explicitly select role_id from postings.
+                # However, for Map View, we KNOW the role_id because we selected it in the UI (selected_role_id).
+                # For Global View, we updated the query to include p.role_id.
+                
+                role_id_for_opp = cand.get('role_id')
+                # Fallback for Map View if 'role_id' not in cand (it might not be in get_candidates_for_position DF yet)
+                # Actually, in Map View calling display_candidate_card, we know the role logic.
+                # Let's rely on cand['role_id'] being present. 
+                # If it's missing in Map View's DF, we must ensure it's there.
+                # get_candidates_for_position logic:
+                # "SELECT c.*, ... FROM fact_applications a JOIN dim_candidates c ... JOIN fact_postings p ..."
+                # We should add p.role_id to that query too if we want to be safe, OR pass it in context.
+                # But wait, looking at lines 460+, we have `selected_role_id`.
+                # Let's try to grab it from cand first.
+                
+                if not role_id_for_opp and 'role_id' in nursery_context:
+                     role_id_for_opp = nursery_context['role_id']
+                
+                # If we still don't have it (e.g. Map View DF didn't have it and context didn't have it), we can't show opps.
+                # NOTE: We need to ensure get_candidates_for_position includes role_id or we pass it.
+                # I will assume we might need to patch get_candidates_for_position OR pass it in context.
+                # Let's pass it in context in the main loop to be safe.
+                
+                if role_id_for_opp and cand.get('distance_km'):
+                     better_opp = get_better_opportunity(cand_lat, cand_lon, cand['distance_km'], role_id_for_opp)
+                     
+                     if better_opp:
+                         folium.Marker(
+                            [better_opp['latitude'], better_opp['longitude']],
+                            tooltip=f"Better Opportunity: {better_opp['nursery_name']} ({round(better_opp['distance'], 1)} km)",
+                            icon=folium.Icon(color='green', icon='thumbs-up', prefix='fa') # changed icon
+                        ).add_to(viz_map)
                 
                 st_folium(viz_map, width="100%", height=300, key=f"map_{cand['application_id']}") # Use app_id for unique key
             else:
@@ -478,7 +513,8 @@ def main():
                             'nursery_id': nursery_id,
                             'nursery_name': nursery_data['nursery_name'],
                             'latitude': nursery_data['latitude'],
-                            'longitude': nursery_data['longitude']
+                            'longitude': nursery_data['longitude'],
+                            'role_id': selected_role_id # Pass role_id for Map View context
                         }
                         display_candidate_card(cand, nursery_context)
 
