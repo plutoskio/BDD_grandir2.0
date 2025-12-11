@@ -115,6 +115,8 @@ def get_candidates_for_position(nursery_id, role_id):
     query = """
     SELECT 
         c.*, 
+        a.application_id,
+        a.current_status,
         a.match_score,
         a.distance_km,
         a.is_diploma_qualified
@@ -157,15 +159,25 @@ def get_closer_opportunities(candidate_lat, candidate_lon, target_dist, role_id)
 def get_application_history(candidate_id, current_nursery_id):
     conn = get_db_connection()
     query = """
-    SELECT DISTINCT n.nursery_name, n.latitude, n.longitude
+    SELECT DISTINCT n.nursery_name, n.latitude, n.longitude, r.role_name, a.current_status, a.application_date
     FROM fact_applications a
     JOIN fact_postings p ON a.posting_id = p.posting_id
     JOIN dim_nurseries n ON p.nursery_id = n.nursery_id
-    WHERE a.candidate_id = ? AND n.nursery_id != ? AND n.latitude IS NOT NULL
+    JOIN dim_roles r ON p.role_id = r.role_id
+    WHERE a.candidate_id = ? AND n.nursery_id != ?
     """
     df = pd.read_sql_query(query, conn, params=(int(candidate_id), int(current_nursery_id)))
     conn.close()
     return df
+
+def update_application_status(application_id, new_status):
+    conn = get_db_connection()
+    conn.execute(
+        "UPDATE fact_applications SET current_status = ?, last_update_date = CURRENT_TIMESTAMP WHERE application_id = ?",
+        (new_status, int(application_id))
+    )
+    conn.commit()
+    conn.close()
 
 # --- Main App ---
 
@@ -255,6 +267,26 @@ def main():
                         
                         # Column 1: Profile
                         with col1:
+                            # Status Editor
+                            current_status = cand.get('current_status') or 'Candidature'
+                            status_options = ['Candidature', 'Entretien', 'Refus', 'Embauché']
+                            
+                            # Handle case where current status isn't in default options
+                            if current_status not in status_options:
+                                status_options.append(current_status)
+                                
+                            new_status = st.selectbox(
+                                "Application Status",
+                                options=status_options,
+                                index=status_options.index(current_status),
+                                key=f"status_{cand['application_id']}"
+                            )
+                            
+                            if new_status != current_status:
+                                update_application_status(cand['application_id'], new_status)
+                                st.toast(f"Status updated to {new_status}!")
+                                st.rerun()
+
                             st.markdown(f"**Email:** {cand['email']}")
                             st.markdown(f"**Phone:** {cand['phone']}")
                             st.markdown(f"**Distance:** {round(cand.get('distance_km', 0) or 0, 1)} km")
@@ -264,6 +296,25 @@ def main():
                                 st.info(f"**AI Summary:**\n{cand['ai_summary']}")
                             else:
                                 st.text("No AI Summary available.")
+                                
+                            # Other Applications (Grouped by Status)
+                            history = get_application_history(cand['candidate_id'], nursery_id)
+                            if not history.empty:
+                                st.divider()
+                                st.markdown("📜 **Other Applications**")
+                                
+                                # Group by Status
+                                status_groups = history.groupby('current_status')
+                                
+                                # Optional: Define order? For now, just iterate.
+                                for status, group in status_groups:
+                                    st.caption(f"**Step: {status}**")
+                                    for _, app in group.iterrows():
+                                        st.markdown(f"- **{app['role_name']}** @ {app['nursery_name']}")
+                                        st.caption(f"Date: {app['application_date']}")
+                            else:
+                                st.divider()
+                                st.caption("No other applications found.")
                                 
 
 
