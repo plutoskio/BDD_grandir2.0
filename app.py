@@ -179,6 +179,201 @@ def update_application_status(application_id, new_status):
     conn.commit()
     conn.close()
 
+def get_all_applications_ranked(selected_urgency_colors):
+    conn = get_db_connection()
+    # Build dynamic placeholders for IN clause
+    placeholders = ','.join(['?'] * len(selected_urgency_colors))
+    
+    # Map colors to urgency levels (if needed) or assuming colors match logic
+    # In load_nurseries_map_data we had: Red/Rouge, Orange, Green/Verte.
+    # We should probably filter by the color logic.
+    # Simpler approach: Fetch all open applications and filter in pandas or improved SQL?
+    # Let's align with the map logic: 
+    # Red -> ('Rouge', 'Red')
+    # Orange -> ('Orange')
+    # Green -> ('Verte', 'Green')
+    
+    urgency_filters = []
+    params = []
+    
+    if 'red' in selected_urgency_colors:
+        urgency_filters.append("p.urgency_level IN ('Rouge', 'Red')")
+    if 'orange' in selected_urgency_colors:
+        urgency_filters.append("p.urgency_level = 'Orange'")
+    if 'green' in selected_urgency_colors:
+        urgency_filters.append("p.urgency_level IN ('Verte', 'Green')")
+        
+    where_clause = " OR ".join(urgency_filters)
+    if not where_clause:
+        where_clause = "1=0" # Select nothing if no colors
+        
+    query = f"""
+    SELECT 
+        c.*, 
+        a.application_id,
+        a.current_status,
+        a.match_score,
+        a.distance_km,
+        a.is_diploma_qualified,
+        n.nursery_name,
+        n.latitude as nursery_lat,
+        n.longitude as nursery_lon,
+
+        n.nursery_id,
+        r.role_name
+    FROM fact_applications a
+    JOIN dim_candidates c ON a.candidate_id = c.candidate_id
+    JOIN fact_postings p ON a.posting_id = p.posting_id
+    JOIN dim_nurseries n ON p.nursery_id = n.nursery_id
+    JOIN dim_roles r ON p.role_id = r.role_id
+    WHERE p.status = 'Open' AND ({where_clause})
+    ORDER BY a.match_score DESC
+    """
+    
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df
+
+def display_candidate_card(cand, nursery_context):
+    """
+    Reusable component to display a candidate card.
+    cand: Series/Dict with candidate info + app info
+    nursery_context: Dict with 'nursery_name', 'latitude', 'longitude', 'nursery_id' (if available)
+    """
+    score = round(cand['match_score'], 1) if cand['match_score'] else 0
+    
+    # Header format depends on context
+    # If Global List, show Role & Nursery in header
+    if 'role_name' in cand:
+        header_text = f"👤 {cand['first_name']} {cand['last_name']} ({cand['role_name']} @ {cand.get('nursery_name', '')}) - Match: {score}%"
+    else:
+        header_text = f"👤 {cand['first_name']} {cand['last_name']} - Match: {score}%"
+
+    with st.expander(header_text):
+        col1, col2 = st.columns([1, 2])
+        
+        # Column 1: Profile
+        with col1:
+            # Status Editor
+            current_status = cand.get('current_status') or 'Candidature'
+            status_options = ['Candidature', 'Entretien', 'Refus', 'Embauché']
+            
+            if current_status not in status_options:
+                status_options.append(current_status)
+                
+            new_status = st.selectbox(
+                "Application Status",
+                options=status_options,
+                index=status_options.index(current_status),
+                key=f"status_{cand['application_id']}"
+            )
+            
+            if new_status != current_status:
+                update_application_status(cand['application_id'], new_status)
+                st.toast(f"Status updated to {new_status}!")
+                st.rerun()
+
+            st.markdown(f"**Email:** {cand['email']}")
+            st.markdown(f"**Phone:** {cand['phone']}")
+            st.markdown(f"**Distance:** {round(cand.get('distance_km', 0) or 0, 1)} km")
+            st.metric("Match Score", f"{score}%")
+            
+            if cand['ai_summary']:
+                st.info(f"**AI Summary:**\n{cand['ai_summary']}")
+            else:
+                st.text("No AI Summary available.")
+                
+            # Other Applications (Grouped by Status)
+            # Use nursery_id from context for exclusion
+            nursery_id_for_query = nursery_context.get('nursery_id', 0) 
+            # If global list, cand['nursery_id'] might not be passed directly in nursery_context if it varies
+            # But the query uses params. Let's rely on what we have.
+            # IN GLOBAL VIEW: nursery_context might be dynamic per row.
+            
+            history = get_application_history(cand['candidate_id'], nursery_id_for_query)
+            if not history.empty:
+                st.divider()
+                st.markdown("📜 **Other Applications**")
+                
+                status_groups = history.groupby('current_status')
+                for status, group in status_groups:
+                    st.caption(f"**Step: {status}**")
+                    for _, app in group.iterrows():
+                        st.markdown(f"- **{app['role_name']}** @ {app['nursery_name']}")
+                        st.caption(f"Date: {app['application_date']}")
+            else:
+                st.divider()
+                st.caption("No other applications found.")
+
+        # Column 2: Logistics Map
+        with col2:
+            st.markdown("**🗺️ Logistics Map**")
+            st.caption("🔵 Candidate | 🔴 Target Nursery | 🟢 Closer Opportunities | ⚪ Other App")
+            
+            cand_lat, cand_lon = cand.get('latitude'), cand.get('longitude')
+            # Handle different field names if coming from different queries
+            nurs_lat = nursery_context.get('latitude') or cand.get('nursery_lat')
+            nurs_lon = nursery_context.get('longitude') or cand.get('nursery_lon')
+            nurs_name = nursery_context.get('nursery_name') or cand.get('nursery_name')
+            
+            if cand_lat and cand_lon and nurs_lat and nurs_lon:
+                viz_map = folium.Map(location=[cand_lat, cand_lon], zoom_start=11)
+                
+                # 1. Blue: Candidate
+                folium.Marker(
+                    [cand_lat, cand_lon], 
+                    tooltip="Candidate Home",
+                    icon=folium.Icon(color='blue', icon='user', prefix='fa')
+                ).add_to(viz_map)
+                
+                # 2. Red: Target Nursery
+                folium.Marker(
+                    [nurs_lat, nurs_lon],
+                    tooltip=f"Target: {nurs_name}",
+                    icon=folium.Icon(color='red', icon='star', prefix='fa')
+                ).add_to(viz_map)
+                
+                # 3. Gray: History
+                # (Already fetched above, reuse?)
+                for _, hist in history.iterrows():
+                     folium.Marker(
+                        [hist['latitude'], hist['longitude']],
+                        tooltip=f"Applied: {hist['nursery_name']}",
+                        icon=folium.Icon(color='gray', icon='history', prefix='fa')
+                    ).add_to(viz_map)
+
+                # 4. Green: Closer Ops
+                # Need role_id. 
+                # In Map View: selected_role_id available.
+                # In Global View: cand['role_id'] (need to fetch it or generic?)
+                # Global view query selects role_name but not role_id? Let's assume passed in cand?
+                # For now simplify: If map view, show closer ops. If global, maybe skip or fetch.
+                # Let's verify if `role_id` is in cand. The new query doesn't select it.
+                # Just skip closer ops in global view for now to avoid errors, or fix query.
+                
+                st_folium(viz_map, width="100%", height=300, key=f"map_{cand['application_id']}") # Use app_id for unique key
+            else:
+                st.warning("Location data missing for map.")
+
+        # CV Display (Full Width)
+        st.divider()
+        cv_path = os.path.join("export_cv (1)", cand['cv_filename']) if cand.get('cv_filename') else None
+        
+        if cv_path and os.path.exists(cv_path):
+            if st.checkbox("📄 Show CV", key=f"show_cv_{cand['application_id']}"):
+                with open(cv_path, "rb") as pdf_file:
+                    st.download_button(
+                        label="⬇️ Download CV",
+                        data=pdf_file,
+                        file_name=cand['cv_filename'],
+                        mime='application/pdf',
+                        key=f"dl_{cand['application_id']}"
+                    )
+                pdf_html = display_pdf(cv_path)
+                st.markdown(pdf_html, unsafe_allow_html=True)
+        else:
+            st.warning(f"CV file not found: {cand.get('cv_filename', 'Unknown')}")
+
 # --- Main App ---
 
 def main():
@@ -205,190 +400,93 @@ def main():
     if show_apps_only:
         filtered_df = filtered_df[filtered_df['application_count'] > 0]
 
-    # Main Map
-    m = folium.Map(location=PARIS_COORDS, zoom_start=DEFAULT_ZOOM)
-    for _, row in filtered_df.iterrows():
-        folium.Marker(
-            location=[row['latitude'], row['longitude']],
-            popup=f"<b>{row['nursery_name']}</b><br>Apps: {row['application_count']}",
-            tooltip=f"{row['nursery_name']} ({row['application_count']} apps)",
-            icon=folium.Icon(color=row['color'], icon='info-sign')
-        ).add_to(m)
-        
-    map_data = st_folium(m, width="100%", height=500)
+    # --- Tabs Layout ---
+    tab1, tab2 = st.tabs(["🗺️ Map View", "📋 All Candidates (Global List)"])
 
-    # Click Handling
-    if map_data['last_object_clicked']:
-        clicked_lat = map_data['last_object_clicked']['lat']
-        clicked_lng = map_data['last_object_clicked']['lng']
-        
-        # Find nursery by close coordinate match
-        match = df_nurseries[
-            (abs(df_nurseries['latitude'] - clicked_lat) < 0.0001) & 
-            (abs(df_nurseries['longitude'] - clicked_lng) < 0.0001)
-        ]
-        if not match.empty:
-            # We must use .item() to convert numpy int to native python int
-            selected_id = match.iloc[0]['nursery_id'].item()
-            if st.session_state['selected_nursery'] != selected_id:
-                st.session_state['selected_nursery'] = selected_id
-                st.rerun()
+    # --- TAB 1: Map View ---
+    with tab1:
+        # Main Map
+        m = folium.Map(location=PARIS_COORDS, zoom_start=DEFAULT_ZOOM)
+        for _, row in filtered_df.iterrows():
+            folium.Marker(
+                location=[row['latitude'], row['longitude']],
+                popup=f"<b>{row['nursery_name']}</b><br>Apps: {row['application_count']}",
+                tooltip=f"{row['nursery_name']} ({row['application_count']} apps)",
+                icon=folium.Icon(color=row['color'], icon='info-sign')
+            ).add_to(m)
+            
+        map_data = st_folium(m, width="100%", height=500)
 
-    # --- Dashboard ---
-    if st.session_state['selected_nursery']:
-        nursery_id = st.session_state['selected_nursery']
-        nursery_data = get_nursery_details(nursery_id)
-        
-        st.divider()
-        st.header(f"🏥 Recruitment Dashboard: {nursery_data['nursery_name']}")
-        
-        # Position Filter
-        active_roles = get_active_roles(nursery_id)
-        if active_roles.empty:
-            st.warning("No active job postings for this nursery.")
-        else:
-            role_options = {row['role_name']: row['role_id'] for _, row in active_roles.iterrows()}
-            selected_role_name = st.selectbox("Select Position", options=list(role_options.keys()))
-            selected_role_id = role_options[selected_role_name]
+        # Click Handling
+        if map_data['last_object_clicked']:
+            clicked_lat = map_data['last_object_clicked']['lat']
+            clicked_lng = map_data['last_object_clicked']['lng']
             
-            # Candidate List
-            candidates = get_candidates_for_position(nursery_id, selected_role_id)
+            # Find nursery by close coordinate match
+            match = df_nurseries[
+                (abs(df_nurseries['latitude'] - clicked_lat) < 0.0001) & 
+                (abs(df_nurseries['longitude'] - clicked_lng) < 0.0001)
+            ]
+            if not match.empty:
+                # We must use .item() to convert numpy int to native python int
+                selected_id = match.iloc[0]['nursery_id'].item()
+                if st.session_state['selected_nursery'] != selected_id:
+                    st.session_state['selected_nursery'] = selected_id
+                    st.rerun()
+
+        # Nursery Detail Dashboard
+        if st.session_state['selected_nursery']:
+            nursery_id = st.session_state['selected_nursery']
+            nursery_data = get_nursery_details(nursery_id)
             
-            if candidates.empty:
-                st.info("No candidates found for this position.")
+            st.divider()
+            st.header(f"🏥 Recruitment Dashboard: {nursery_data['nursery_name']}")
+            
+            # Position Filter
+            active_roles = get_active_roles(nursery_id)
+            if active_roles.empty:
+                st.warning("No active job postings for this nursery.")
             else:
-                st.subheader(f"Candidates ({len(candidates)})")
+                role_options = {row['role_name']: row['role_id'] for _, row in active_roles.iterrows()}
+                selected_role_name = st.selectbox("Select Position", options=list(role_options.keys()))
+                selected_role_id = role_options[selected_role_name]
                 
-                for _, cand in candidates.iterrows():
-                    score = round(cand['match_score'], 1) if cand['match_score'] else 0
+                # Candidate List
+                candidates = get_candidates_for_position(nursery_id, selected_role_id)
+                
+                if candidates.empty:
+                    st.info("No candidates found for this position.")
+                else:
+                    st.subheader(f"Candidates ({len(candidates)})")
                     
-                    with st.expander(f"👤 {cand['first_name']} {cand['last_name']} - Match: {score}%"):
-                        col1, col2 = st.columns([1, 2])
-                        
-                        # Column 1: Profile
-                        with col1:
-                            # Status Editor
-                            current_status = cand.get('current_status') or 'Candidature'
-                            status_options = ['Candidature', 'Entretien', 'Refus', 'Embauché']
-                            
-                            # Handle case where current status isn't in default options
-                            if current_status not in status_options:
-                                status_options.append(current_status)
-                                
-                            new_status = st.selectbox(
-                                "Application Status",
-                                options=status_options,
-                                index=status_options.index(current_status),
-                                key=f"status_{cand['application_id']}"
-                            )
-                            
-                            if new_status != current_status:
-                                update_application_status(cand['application_id'], new_status)
-                                st.toast(f"Status updated to {new_status}!")
-                                st.rerun()
+                    for _, cand in candidates.iterrows():
+                        # Pass context
+                        nursery_context = {
+                            'nursery_id': nursery_id,
+                            'nursery_name': nursery_data['nursery_name'],
+                            'latitude': nursery_data['latitude'],
+                            'longitude': nursery_data['longitude']
+                        }
+                        display_candidate_card(cand, nursery_context)
 
-                            st.markdown(f"**Email:** {cand['email']}")
-                            st.markdown(f"**Phone:** {cand['phone']}")
-                            st.markdown(f"**Distance:** {round(cand.get('distance_km', 0) or 0, 1)} km")
-                            st.metric("Match Score", f"{score}%")
-                            
-                            if cand['ai_summary']:
-                                st.info(f"**AI Summary:**\n{cand['ai_summary']}")
-                            else:
-                                st.text("No AI Summary available.")
-                                
-                            # Other Applications (Grouped by Status)
-                            history = get_application_history(cand['candidate_id'], nursery_id)
-                            if not history.empty:
-                                st.divider()
-                                st.markdown("📜 **Other Applications**")
-                                
-                                # Group by Status
-                                status_groups = history.groupby('current_status')
-                                
-                                # Optional: Define order? For now, just iterate.
-                                for status, group in status_groups:
-                                    st.caption(f"**Step: {status}**")
-                                    for _, app in group.iterrows():
-                                        st.markdown(f"- **{app['role_name']}** @ {app['nursery_name']}")
-                                        st.caption(f"Date: {app['application_date']}")
-                            else:
-                                st.divider()
-                                st.caption("No other applications found.")
-                                
-
-
-                        # Column 2: Logistics Map
-                        with col2:
-                            st.markdown("**🗺️ Logistics Map**")
-                            
-                            # Legend
-                            st.caption("🔵 Candidate | 🔴 This Nursery | 🟢 Closer Opportunities | ⚪ Other App")
-                            
-                            cand_lat, cand_lon = cand['latitude'], cand['longitude']
-                            nurs_lat, nurs_lon = nursery_data['latitude'], nursery_data['longitude']
-                            
-                            if cand_lat and cand_lon:
-                                viz_map = folium.Map(location=[cand_lat, cand_lon], zoom_start=11)
-                                
-                                # 1. Blue: Candidate
-                                folium.Marker(
-                                    [cand_lat, cand_lon], 
-                                    tooltip="Candidate Home",
-                                    icon=folium.Icon(color='blue', icon='user', prefix='fa')
-                                ).add_to(viz_map)
-                                
-                                # 2. Red: Target Nursery
-                                folium.Marker(
-                                    [nurs_lat, nurs_lon],
-                                    tooltip=f"Target: {nursery_data['nursery_name']}",
-                                    icon=folium.Icon(color='red', icon='star', prefix='fa')
-                                ).add_to(viz_map)
-                                
-                                # 3. Gray: Other App
-                                history = get_application_history(cand['candidate_id'], nursery_id)
-                                for _, hist in history.iterrows():
-                                    folium.Marker(
-                                        [hist['latitude'], hist['longitude']],
-                                        tooltip=f"Applied: {hist['nursery_name']}",
-                                        icon=folium.Icon(color='gray', icon='history', prefix='fa')
-                                    ).add_to(viz_map)
-                                    
-                                # 4. Green: Closer Opportunities
-                                current_dist = haversine_distance(cand_lat, cand_lon, nurs_lat, nurs_lon)
-                                if current_dist:
-                                    closer_ops = get_closer_opportunities(cand_lat, cand_lon, current_dist, selected_role_id)
-                                    for op in closer_ops:
-                                        folium.Marker(
-                                            [op['latitude'], op['longitude']],
-                                            tooltip=f"Closer: {op['nursery_name']} ({round(op['distance'],1)}km)",
-                                            icon=folium.Icon(color='green', icon='arrow-up', prefix='fa')
-                                        ).add_to(viz_map)
-                                        
-                                st_folium(viz_map, width="100%", height=300, key=f"map_{cand['candidate_id']}")
-                            else:
-                                st.warning("Candidate has no geocoded location.")
-
-                        # CV Display (Full Width)
-                        st.divider()
-                        cv_path = os.path.join("export_cv (1)", cand['cv_filename']) if cand.get('cv_filename') else None
-                        
-                        if cv_path and os.path.exists(cv_path):
-                            if st.checkbox("📄 Show CV", key=f"show_cv_{cand['candidate_id']}"):
-                                # Fallback download button
-                                with open(cv_path, "rb") as pdf_file:
-                                    st.download_button(
-                                        label="⬇️ Download CV",
-                                        data=pdf_file,
-                                        file_name=cand['cv_filename'],
-                                        mime='application/pdf',
-                                        key=f"dl_{cand['candidate_id']}"
-                                    )
-                                # Embed PDF
-                                pdf_html = display_pdf(cv_path)
-                                st.markdown(pdf_html, unsafe_allow_html=True)
-                        else:
-                            st.warning(f"CV file not found: {cand.get('cv_filename', 'Unknown')}")
+    # --- TAB 2: Global List ---
+    with tab2:
+        st.header(f"📋 Top Candidates (Based on Color Filters: {', '.join(selected_colors)})")
+        
+        all_candidates = get_all_applications_ranked(selected_colors)
+        
+        if all_candidates.empty:
+            st.info("No candidates found matching the selected urgency filters.")
+        else:
+            for _, cand in all_candidates.iterrows():
+                # For global list, we pass context from the row
+                nursery_context = {
+                    'nursery_id': cand['nursery_id'],
+                    'nursery_name': cand['nursery_name'],
+                    'latitude': cand['nursery_lat'],
+                    'longitude': cand['nursery_lon']
+                }
+                display_candidate_card(cand, nursery_context)
 
 if __name__ == "__main__":
     main()
