@@ -258,9 +258,9 @@ def display_candidate_card(cand, nursery_context):
     # Header format depends on context
     # If Global List, show Role & Nursery in header
     if 'role_name' in cand:
-        header_text = f"{cand['first_name']} {cand['last_name']} ({cand['role_name']} @ {cand.get('nursery_name', '')}) - Match: {score}%"
+        header_text = f"{cand['first_name']} {cand['last_name']} ({cand['role_name']} @ {cand.get('nursery_name', '')}) - Match: {score}/10"
     else:
-        header_text = f"{cand['first_name']} {cand['last_name']} - Match: {score}%"
+        header_text = f"{cand['first_name']} {cand['last_name']} - Match: {score}/10"
 
     with st.expander(header_text):
         col1, col2 = st.columns([1, 2])
@@ -289,7 +289,13 @@ def display_candidate_card(cand, nursery_context):
             st.markdown(f"**Email:** {cand['email']}")
             st.markdown(f"**Phone:** {cand['phone']}")
             st.markdown(f"**Distance:** {round(cand.get('distance_km', 0) or 0, 1)} km")
-            st.metric("Match Score", f"{score}%")
+            st.metric("Match Score", f"{score}/10")
+            
+            # Prerequisites Indicator
+            if cand.get('is_diploma_qualified'):
+                st.success("✅ Prerequisites Met")
+            else:
+                st.error("❌ Prerequisites Not Met")
             
             if cand['ai_summary']:
                 st.info(f"**AI Summary:**\n{cand['ai_summary']}")
